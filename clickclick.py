@@ -1454,6 +1454,10 @@ class _Auto:
     def find(self, tempname, timeout=None, similarity=None, rect=None):
         return self._locator.find(tempname, timeout=timeout, area=rect)
 
+    def find_all(self, tempname, timeout=None, similarity=None, rect=None):
+        """查找所有匹配目标，返回逻辑坐标列表 [(x, y), ...]"""
+        return self._locator.find_all(tempname, timeout=timeout, area=rect)
+ 
     def wait(self, tempname, timeout=30):
         logger.info(f"等待 '{tempname}' 出现（超时={timeout}s）...")
         print(f"等待 '{tempname}' 出现...")
