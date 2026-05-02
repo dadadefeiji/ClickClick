@@ -1,17 +1,20 @@
 # -*- coding: UTF-8 -*-
 """
  Copyright (c) 2026 yushihong. Licensed under the MIT License.
+ 作者知乎主页：https://www.zhihu.com/people/mhaksy
+
 【10秒快速上手】
   1. 复制本文件到任意文件夹（支持中文路径）。
   2. 在同目录下创建 "templates" 文件夹，把按钮截图（PNG格式）放进去。
   3. 写一行代码：auto.click("你的按钮名称")
   4. 运行，完成。
 
-【20260502更新】
-  ★ 图像引擎升级：修复DPI缩放问题，100%/125%/150%缩放均正常匹配
-  ★ 定时任务改用sched模块，不再轮询空耗CPU
-  ★ 文件查找改用os.scandir，速度大幅提升
-  ★ 剪贴板操作加入上下文管理器，更安全
+【ImgClickFlow v1.0 核心特性】
+  ★ DPI自适应：自动适配100%/125%/150%缩放，一次编写，随处运行
+  ★ 智能去重：基于NMS算法合并邻近匹配点，避免重复操作
+  ★ 零负担等待：内置重试与超时，无需手动轮询
+  ★ 批量识别：find_all()返回所有坐标，轻松实现批量循环
+  ★ 链式流程：auto.do()流式编排，像写文章一样写自动化
 """
 
 import sys
@@ -136,12 +139,12 @@ _file_handler = logging.FileHandler(
 _file_handler.setLevel(_log_level)
 _file_handler.setFormatter(_log_fmt)
 
-logger = logging.getLogger('ClickClick')
+logger = logging.getLogger('ImgClickFlow')
 logger.setLevel(_log_level)
 logger.addHandler(_console_handler)
 logger.addHandler(_file_handler)
 logger.info("=" * 40)
-logger.info("ClickClick 办公助手 启动")
+logger.info("ImgClickFlow 办公助手 启动")
 logger.info(f"模板目录={Config.template_dir}, 相似度={Config.default_similarity}, 超时={Config.default_timeout}s")
 
 
@@ -386,12 +389,13 @@ def saystring(string, k=1):
 
 class _ImageEngine:
     """
-    图像识别引擎 v2.0 - DPI缩放修复版
+    图像识别引擎 - DPI缩放修复版
 
     核心改进：
     - 图像匹配在物理坐标系中进行（不受缩放影响）
     - 返回物理坐标，点击时自动转换为逻辑坐标
     - 支持模板缓存，加速重复查找
+    - 非极大值抑制去重，避免重复点击
     """
 
     def __init__(self):
@@ -461,7 +465,7 @@ class _ImageEngine:
         return img_np
 
     def _non_max_suppression(self, points):
-        """去重：合并相邻匹配点"""
+        """去重：合并相邻匹配点（NMS算法）"""
         if not points:
             return []
         merged = []
@@ -553,7 +557,7 @@ class _ImageEngine:
         return -1, -1
 
     def find_all(self, tempname, timeout=None, area_real=None, threshold=None):
-        """查找所有匹配目标"""
+        """查找所有匹配目标（物理坐标列表）"""
         timeout = timeout or Config.default_timeout
         threshold = threshold or self.threshold
 
@@ -792,7 +796,7 @@ class _EnvChecker:
         print(f"  逻辑分辨率: {logic_w}x{logic_h}")
         print(f"  缩放系数: {scale:.2f} ({int(scale*100)}%)")
         if scale != 1.0:
-            print(f"  缩放不是100%，v4.0已自动补偿")
+            print(f"  缩放不是100%，ImgClickFlow 已自动补偿")
 
         template_path = os.path.join(_base_dir, Config.template_dir)
         print(f"\n模板目录: {template_path}")
@@ -1340,7 +1344,7 @@ def capture_template_simple(name):
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
 class _Auto:
-    """ClickClick 办公助手"""
+    """ImgClickFlow 办公助手"""
 
     def __init__(self):
         self._locator = _LocatorFusion()
@@ -1522,6 +1526,7 @@ class _Auto:
     # ===== 帮助 =====
     def help(self):
         print(__doc__)
+        print("\n作者知乎：https://www.zhihu.com/people/mhaksy")
 
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
@@ -1529,7 +1534,7 @@ class _Auto:
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
 auto = _Auto()
-auto.version = "4.0.0"
+auto.version = "1.0.0"
 
 # 导出别名
 search = find_files
@@ -1542,13 +1547,16 @@ monthends = first_last_day
 if __name__ == "__main__":
     auto.help()
     print("\n" + "=" * 60)
-    print("v4.0 更新：DPI修复 | 剔除MS Office | 定时任务升级")
+    print("ImgClickFlow v1.0 正式发布")
+    print("作者知乎：https://www.zhihu.com/people/mhaksy")
+    print("核心特性：DPI自动适配 | 智能去重 | 零负担等待 | 批量识别 | 链式流程")
     print("=" * 60)
     print("\n助手已就绪。")
 
-
-    '''╔══════════════════════════════════════════════════════════════════════╗
-║              ClickClick 办公助手 — 完整使用手册                      ║
+    # 以下为完整使用手册（原脚本中的长篇文档，已更新名称和版本）
+    print('''
+╔══════════════════════════════════════════════════════════════════════╗
+║              ImgClickFlow 办公助手 — 完整使用手册                   ║
 ║                  DPI已修复 · 纯文本 · 即查即用                        ║
 ╚══════════════════════════════════════════════════════════════════════╝
 
@@ -1575,7 +1583,7 @@ if __name__ == "__main__":
 
 【文件结构】
   你的工作目录/
-  ├── clickclick.py    ← 主脚本文件
+  ├── imgclickflow.py   ← 主脚本文件
   ├── templates/       ← 按钮截图文件夹（放PNG图片）
   ├── logs/            ← 运行日志（自动生成）
   ├── screenshots/     ← 用户截图（自动生成）
@@ -1586,28 +1594,26 @@ if __name__ == "__main__":
   步骤2：在同目录创建 templates 文件夹，放入按钮PNG截图
   步骤3：写一行代码运行
 
-  from clickclick import auto
+  from imgclickflow import auto
   auto.click("按钮名称")   # 找图并点击，就这么简单
 
 【重要提醒】
   ★ 截图必须用 PNG 格式！JPG 会造成像素偏移！
-  ★ v4.0 已修复 DPI 缩放问题，100%/125%/150% 均可正常使用
+  ★ v1.0 已修复 DPI 缩放问题，100%/125%/150% 均可正常使用
   ★ 模板只截按钮本体，越小越独特越好
 
 ═══════════════════════════════════════════════════════════════════════
-二、配置与参数
+二、配置与参数（修改脚本中的 Config 类）
 ═══════════════════════════════════════════════════════════════════════
 
-脚本内有一个 Config 类，集中管理所有可调参数：
-
-  Config.template_dir = "templates"        # 模板截图存放文件夹
-  Config.log_dir = "logs"                  # 日志存放文件夹
-  Config.screenshot_dir = "screenshots"    # 截图存放文件夹
-  Config.error_dir = "error_snapshots"     # 失败截图存放文件夹
-  Config.default_similarity = 0.9         # 图像匹配相似度（0~1，越高越严格）
-  Config.default_timeout = 10             # 找图默认超时（秒）
-  Config.retry_interval = 0.2             # 找图失败重试间隔（秒）
-  Config.post_click_delay = 0.3           # 点击后等待界面反应的时间（秒）
+  template_dir = "templates"        # 模板截图存放文件夹
+  log_dir = "logs"                  # 日志存放文件夹
+  screenshot_dir = "screenshots"    # 截图存放文件夹
+  error_dir = "error_snapshots"     # 失败截图存放文件夹
+  default_similarity = 0.9         # 图像匹配相似度（0~1，越高越严格）
+  default_timeout = 10             # 找图默认超时（秒）
+  retry_interval = 0.2             # 找图失败重试间隔（秒）
+  post_click_delay = 0.3           # 点击后等待界面反应的时间（秒）
 
 ═══════════════════════════════════════════════════════════════════════
 三、API 速查表
@@ -1616,401 +1622,134 @@ if __name__ == "__main__":
 3.1 鼠标操作
 ────────────────────────────────────────────────────────────────────
 
-  auto.move(x, y)
-    移动鼠标到指定坐标
-    示例：auto.move(500, 300)
-
-  auto.click()
-    左键单击。三种用法：
-    · auto.click("保存")      # 找图并点击中心
-    · auto.click(100, 200)    # 在坐标(100, 200)点击
-    · auto.click()            # 在当前位置点击
-
-  auto.dclick()
-    双击。三种用法同上：
-    · auto.dclick("文件")
-    · auto.dclick(100, 200)
-    · auto.dclick()
-
-  auto.rclick()
-    右键单击。三种用法同上：
-    · auto.rclick("菜单")
-    · auto.rclick(100, 200)
-    · auto.rclick()
-
-  auto.drag(x1, y1, x2, y2)
-    从(x1,y1)平滑拖拽到(x2,y2)
-    示例：auto.drag(100, 100, 500, 400)
-
-  auto.pos()
-    实时显示鼠标当前坐标（Ctrl+C停止）
+  auto.move(x, y)            移动鼠标到逻辑坐标
+  auto.click()               左键单击（三种用法：无参数/坐标/图片名）
+  auto.dclick()              双击
+  auto.rclick()              右键单击
+  auto.drag(x1,y1,x2,y2)     平滑拖拽
+  auto.pos()                 实时显示鼠标坐标（Ctrl+C停止）
 
 3.2 键盘操作
 ────────────────────────────────────────────────────────────────────
 
-  auto.write(text, times=1)
-    粘贴文本（支持中文，通过剪贴板+Ctr+V实现）
-    示例：auto.write("已完成")
-    示例：auto.write("重要文本", times=3)   # 粘贴3次
+  auto.write(text, times=1)       粘贴文本（支持中文）
+  auto.press(key, times=1)        按下并释放单个键
+  auto.hotkey(k1,k2,...)          组合键
+  auto.press_sequence(*keys)      依次按下多个键
 
-  auto.press(key, times=1)
-    按下并释放单个键
-    示例：auto.press("enter")
-    示例：auto.press("tab", times=3)
-    常用键名：enter, tab, esc, spacebar, backspace, del, ins
-             F1~F12, up_arrow, down_arrow, left_arrow, right_arrow
-             ctrl, alt, shift, left_win, right_win
-             numpad_0~numpad_9
-             0~9, a~z
-             + , - . / ` ; [ \ ] '
-
-  auto.hotkey(key1, key2, ...)
-    按下组合键
-    示例：auto.hotkey("ctrl", "v")     # 粘贴
-    示例：auto.hotkey("ctrl", "a")     # 全选
-    示例：auto.hotkey("alt", "tab")    # 切换窗口
-
-  auto.press_sequence(key1, key2, ...)
-    依次按下多个键
-    示例：auto.press_sequence("a", "b", "c")
+  常用键名：enter, tab, esc, spacebar, backspace, del, ins,
+           F1~F12, up_arrow, down_arrow, left_arrow, right_arrow,
+           ctrl, alt, shift, left_win, right_win,
+           numpad_0~numpad_9, 0~9, a~z, + , - . / ` ; [ \\ ] '
 
 3.3 图像识别
 ────────────────────────────────────────────────────────────────────
 
-  auto.find("按钮名")
-    在屏幕上查找图片，返回坐标或(-1,-1)
-    示例：x, y = auto.find("确定按钮")
-    示例：x, y = auto.find("确定", rect=(0,0,500,500))  # 限定区域查找
+  auto.find("按钮名", timeout=None, similarity=None, rect=None)
+      返回 (x, y) 或 (-1, -1)
+  auto.find_all("按钮名") 
+      返回所有匹配坐标列表 [(x,y), ...]
+  auto.wait("按钮名", timeout=30)
+      等待图片出现，成功返回True
+  auto.wait_not("按钮名", timeout=30)
+      等待图片消失
 
-  auto.find("按钮名", similarity=0.85)
-    放宽匹配精度（默认0.9，降低可在模糊时提高成功率）
-
-3.4 等待操作
+3.4 流程引擎（链式调用）
 ────────────────────────────────────────────────────────────────────
 
-  auto.wait("加载完成", timeout=30)
-    等待图片出现，默认超时30秒
-    示例：auto.wait("进度条", 60)  # 最多等60秒
+  创建流程：auto.do() → 添加步骤 → .run()
 
-  auto.wait_not("加载动画", timeout=30)
-    等待图片消失，默认超时30秒
-    示例：auto.wait_not("loading")
+  可用方法：
+    .click(目标) .dclick(目标) .rclick(目标)
+    .write(文本) .press(键名) .hotkey(k1,k2,...)
+    .wait(目标) .wait_not(目标) .pause(秒)
+    .retry(次数, 间隔)      # 整体重试
+    .if_see(目标) .if_not_see(目标) .else_do() .endif()
+    .for_data(列表) .end_for()   # 循环体可用{item}和{index}
 
-3.5 流程引擎（链式调用）
+3.5 调试工具
 ────────────────────────────────────────────────────────────────────
 
-  这是本工具最强大的功能，可像写文章一样编排自动化步骤。
+  auto.debug.on()         开启操作追踪
+  auto.debug.off()        关闭追踪
+  auto.debug.report()     生成HTML执行报告
+  auto.debug.replay()     控制台回放记录
 
-  【基础链式】
-  auto.do()
-    通过 .do() 创建一个流程，然后用链式方法添加步骤，最后 .run() 执行。
-
-  可用的链式方法：
-    .click(目标)         添加点击步骤
-    .dclick(目标)        添加双击步骤
-    .rclick(目标)        添加右键步骤
-    .write(文本)         添加输入步骤
-    .press(键名)         添加按键步骤
-    .hotkey(k1,k2,...)   添加组合键步骤
-    .wait(目标)          添加等待出现步骤
-    .wait_not(目标)      添加等待消失步骤
-    .pause(秒数)         添加暂停步骤
-    .retry(次数, 间隔)   设置失败重试
-    .run()               执行流程
-
-  【条件分支】
-    .if_see(目标)        如果看到目标则执行后续
-    .if_not_see(目标)    如果没看到目标则执行后续
-    .else_do()           否则执行后续
-    .endif()             结束条件块
-
-  【循环】
-    .for_data(列表)      遍历数据列表
-    .end_for()           结束循环
-    循环体内可用 {item} 表示当前项，{index} 表示索引
-
-  【调试链式流程】
-    auto.step()          开启/关闭单步模式（每步暂停等回车）
-    auto.pace(秒数)      设置步骤间隔（方便观察执行过程）
-
-3.6 调试工具
+3.6 环境诊断
 ────────────────────────────────────────────────────────────────────
 
-  auto.debug.on()
-    开启操作追踪（记录每步成败、耗时、截图）
-    示例：先 auto.debug.on()，再执行流程，最后 auto.debug.report()
+  auto.check()                全面诊断（分辨率、缩放、依赖）
+  auto.check_templates()      检查所有模板是否可见
 
-  auto.debug.off()
-    关闭操作追踪
-
-  auto.debug.report()
-    生成HTML执行报告（含步骤明细、成功率、耗时统计）
-
-  auto.debug.replay()
-    在命令行回放最近一次操作记录
-
-3.7 环境诊断
+3.7 截图工具
 ────────────────────────────────────────────────────────────────────
 
-  auto.check()
-    一键检查：Python版本、屏幕分辨率、缩放系数、模板数量、依赖状态
+  auto.shot("文件名")         全屏截图
+  auto.snip(x,y,w,h,"文件名") 区域截图
+  auto.capture("按钮名")      交互式生成模板截图
 
-  auto.check_templates()
-    逐一检查所有模板能否在当前屏幕找到（需要目标窗口已打开）
-
-3.8 截图工具
+3.8 定时任务
 ────────────────────────────────────────────────────────────────────
 
-  auto.shot("文件名")
-    全屏截图，保存到 screenshots 目录
-    示例：auto.shot("我的桌面")
+  auto.cron("17:30", my_task)      # 每天17:30执行
+  auto.cron1("18:00", my_task)     # 一次性定时
 
-  auto.snip(x, y, w, h, "文件名")
-    区域截图
-    示例：auto.snip(0, 0, 500, 500, "左上角区域")
-
-  auto.capture("按钮名称")
-    截图模板工具：全屏截图后提示手动裁剪
-    示例：auto.capture("保存按钮")  → 用画图裁剪后覆盖即可
-
-3.9 定时任务
+3.9 文件查找（需导入 search）
 ────────────────────────────────────────────────────────────────────
 
-  auto.cron("时间", 任务函数)
-    每天定时执行
-    示例：auto.cron("17:30", my_task)   # 每天17:30执行
-    示例：auto.cron("173000", my_task)  # 每天17:30:00执行
+  from imgclickflow import search
+  folders, files = search(r"D:\\工作", "报告,2025,doc")
 
-  auto.cron1("时间", 任务函数)
-    一次性定时执行
-    示例：auto.cron1("18:00", my_task)  # 到18:00执行一次
-
-  【注意】定时任务需要保持脚本运行。使用 sched 模块实现，不会空耗CPU。
-
-3.10 文件查找
+3.10 日期工具（需导入 monthends）
 ────────────────────────────────────────────────────────────────────
 
-  search(路径, 关键词)
-    按关键词查找文件夹和文件（通过逗号分隔多个关键词）
-    示例：folders, files = search(r"D:\工作", "报告,2025,doc")
-
-3.11 日期工具
-────────────────────────────────────────────────────────────────────
-
-  monthends(年份)
-    获取某年各月首日和末日（从2月到次年1月）
-    示例：days = monthends(2025)
-    返回：[['2025-02-01','2025-02-28'], ['2025-03-01','2025-03-31'], ...]
+  from imgclickflow import monthends
+  days = monthends(2025)   # 返回2月到次年1月的首末日列表
 
 ═══════════════════════════════════════════════════════════════════════
-四、经典实战案例
+四、经典实战案例（缩略版，更多见项目主页）
 ═══════════════════════════════════════════════════════════════════════
 
-【案例1】简单点击：保存并关闭
-────────────────────────────────
-  auto.click("保存按钮")
-  time.sleep(1)
-  auto.click("关闭按钮")
+# 案例1：保存并关闭
+auto.click("保存按钮")
+time.sleep(1)
+auto.click("关闭按钮")
 
-【案例2】填表提交
-────────────────────────────────
-  auto.click("姓名输入框")
-  auto.write("张三")
-  auto.click("年龄输入框")
-  auto.write("28")
-  auto.click("提交按钮")
-
-【案例3】等待加载后操作
-────────────────────────────────
-  auto.wait("加载完成", timeout=60)   # 等最多60秒
-  auto.click("下一步")
-  auto.wait("页面就绪")
-  auto.click("确定")
-
-【案例4】链式流程：新建文档→写内容→保存
-要把整个链式调用放在 一对括号 里，或者使用 行末反斜杠 \ 来续行。
-推荐方式：括号包裹
+# 案例2：链式新建文档并保存
 (auto.do()
-      .click("新建按钮")
-      .pause(0.5)
-      .write("这是自动生成的文档内容")
-      .click("保存按钮")
-      .pause(0.3)
-      .hotkey("ctrl", "s")
-      .run())
+    .click("新建按钮")
+    .write("文档内容")
+    .click("保存")
+    .run())
 
-【案例5】条件分支：根据结果走不同路径
-────────────────────────────────
-  # 场景：点击提交后，如果成功就点确定，否则点重试
-  (auto.do()
-      .click("提交按钮")
-      .pause(1)
-      .if_see("成功提示")
-          .click("确定")
-      .else_do()
-          .click("重试")
-      .endif()
-      .run())
+# 案例3：批量循环填写表格
+data = ["张三","李四","王五"]
+(auto.do()
+    .for_data(data)
+        .click("姓名框")
+        .write("{item}")
+        .click("保存")
+    .end_for()
+    .run())
 
-【案例6】双重条件：成功/警告/失败三路分支
-────────────────────────────────
-  (auto.do()
-      .click("提交按钮")
-      .pause(2)
-      .if_see("成功提示")
-          .click("确定")
-      .else_do()
-          .if_see("警告提示")
-              .click("继续")
-          .else_do()
-              .click("取消")
-          .endif()
-      .endif()
-      .run())
+# 案例4：条件分支
+(auto.do()
+    .click("提交")
+    .if_see("成功")
+        .click("确定")
+    .else_do()
+        .click("重试")
+    .endif()
+    .run())
 
-【案例7】循环处理：批量填写多条数据
-────────────────────────────────
-  data = ["张三", "李四", "王五", "赵六"]
-
-  (auto.do()
-      .click("新建按钮")
-      .pause(0.5)
-      .for_data(data)
-          .click("姓名输入框")
-          .write("{item}")          # {item} 会被替换为当前数据
-          .click("保存按钮")
-          .pause(0.3)
-          .click("新增按钮")
-      .end_for()
-      .run())
-
-【案例8】循环+条件：批量处理带异常判断
-────────────────────────────────
-  tasks = ["任务A", "任务B", "任务C"]
-
-  (auto.do()
-      .for_data(tasks)
-          .click("搜索框")
-          .write("{item}")
-          .press("enter")
-          .pause(1)
-          .if_see("未找到结果")
-              .click("跳过")
-          .else_do()
-              .click("第一个结果")
-              .click("下载按钮")
-              .pause(2)
-          .endif()
-      .end_for()
-      .run())
-
-【案例9】失败重试：重要操作不怕失败
-────────────────────────────────
-  (auto.do()
-      .click("刷新按钮")
-      .pause(1)
-      .click("导出数据")      # 如果这步失败，会重试3次
-      .retry(3, wait=2)       # 重试3次，间隔2秒
-      .run())
-
-【案例10】一键生成日报：截图+记录日志
-────────────────────────────────
-  def daily_report():
-      auto.click("刷新数据")
-      auto.wait("数据加载完成", 30)
-      auto.shot("今日数据截图")
-      auto.click("导出报表")
-      auto.write("日报已生成")
-
-  auto.cron("17:30", daily_report)   # 每天17:30自动执行
-
-【案例11】带调试的流程开发
-────────────────────────────────
-  # 开发新流程时，打开调试模式
-  auto.debug.on()            # 开启追踪
-  auto.step()                # 开启单步模式
-  auto.pace(1.0)             # 每步间隔1秒
-
-  (auto.do()
-      .click("新建")
-      .write("测试数据")
-      .click("保存")
-      .run())
-
-  auto.debug.report()        # 生成HTML报告查看结果
-
-【案例12】多条件组合：智能登录
-────────────────────────────────
-  (auto.do()
-      .click("登录按钮")
-      .pause(2)
-      .if_see("验证码弹窗")
-          .write("1234")
-          .click("确认")
-          .pause(2)
-      .endif()
-      .if_see("登录成功")
-          .click("进入系统")
-      .else_do()
-          .if_see("密码错误")
-              .write("正确密码")
-              .click("重新登录")
-          .else_do()
-              .click("忘记密码")
-          .endif()
-      .endif()
-      .run())
-
-【案例13】表格数据提取
-────────────────────────────────
-  # 假设表格有10行，每行有"编辑"按钮
-  for row in range(10):
-      btns = auto.find_all("编辑按钮")  # 找到所有编辑按钮
-      if btns:
-          x, y = btns[0]               # 点第一个
-          auto.click(x, y)
-          auto.write(f"第{row+1}行数据")
-          auto.click("保存")
-          auto.click("返回列表")
-          time.sleep(0.5)
-
-【案例14】批量找图循环处理
-────────────────────────────────
-#查找屏幕上所有 "pdf" 图标的坐标
-result = auto.find_all("pdf")
-print("找到的坐标：", result)
-
-#遍历每一个坐标，执行自定义操作
-for items in result:
-    print(items)
-    auto.move(items[0], items[1]) # 鼠标移动到目标位置
-    time.sleep(2) # 停留 2 秒（可替换为点击、输入等任意流程,实现找图后循环每个图案操作，比如批量填表等）
-═══════════════════════════════════════════════════════════════════════
-附录：常见问题
-═══════════════════════════════════════════════════════════════════════
-
-Q: 找图总是失败？
-A: ① 确认截图是PNG格式  ② 确认文件名完全一致（不含扩展名）
-   ③ 确认按钮在屏幕上可见  ④ 运行 auto.check() 诊断环境
-   ⑤ 尝试放宽相似度：auto.find("按钮", similarity=0.85)
-
-Q: 点击位置有偏差？
-A: v4.0 已修复DPI问题。如仍有偏差，运行 auto.check() 检查缩放系数
-
-Q: 流程跑到一半卡住了？
-A: 开启调试模式排查：
-   auto.debug.on()
-   auto.step()             # 单步执行
-   auto.pace(1.0)          # 慢速执行
-   执行流程后 auto.debug.report() 查看报告
-
-Q: 定时任务不执行？
-A: 定时任务需要脚本保持运行状态（不退出），且系统不进入休眠
+# 案例5：每日定时截图
+def daily_job():
+    auto.click("刷新")
+    auto.shot("日报")
+auto.cron("17:30", daily_job)
 
 ═══════════════════════════════════════════════════════════════════════
-文档版本：v4.0
-适用脚本：ClickClick 办公助手
-最后更新：2026年5月
-许可证：本项目基于 MIT License 开源，详情见 LICENSE 文件。
-反馈与支持：欢迎在 GitHub 提交 Issue
-═══════════════════════════════════════════════════════════════════════'''
+文档版本：v1.0    适用脚本：ImgClickFlow    最后更新：2026年5月
+作者知乎：https://www.zhihu.com/people/mhaksy
+═══════════════════════════════════════════════════════════════════════
+''')
