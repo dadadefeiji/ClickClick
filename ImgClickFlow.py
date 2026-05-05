@@ -26,6 +26,7 @@ import logging
 import re
 import json
 import sched
+import threading
 from ctypes import Structure, c_ulong, windll, byref
 from typing import List, Tuple, Union, Optional, Callable, Dict
 
@@ -68,7 +69,7 @@ if _missing:
 
 import cv2
 import numpy as np
-from PIL import Image, ImageGrab
+from PIL import Image, ImageDraw, ImageFont, ImageGrab
 import win32gui
 import win32api
 import win32con
@@ -853,10 +854,11 @@ class _EnvChecker:
 class Flow:
     """流程引擎"""
 
-    def __init__(self, locator, recorder, error_handler):
+    def __init__(self, locator, recorder, error_handler, debug_recorder=None):
         self.locator = locator
         self.recorder = recorder
         self.error_handler = error_handler
+        self._debug_recorder = debug_recorder
         self.steps = []
         self._current_if_stack = []
         self._retry_count = 0
@@ -947,19 +949,66 @@ class Flow:
                 time.sleep(self._retry_wait)
             try:
                 if self._execute_steps(self.steps):
+                    if self._debug_recorder:
+                        self._debug_recorder.success()
                     return True
             except Exception as e:
                 last_error = e
                 logger.error(f"流程异常: {e}")
 
         if last_error:
+            if self._debug_recorder:
+                self._debug_recorder.failure(str(last_error))
             logger.error(f"最终错误: {last_error}")
         return False
+
+    def _make_action_str(self, action, target, kwargs):
+        """为调试录像生成操作描述字符串"""
+        if action in ('click', 'dclick', 'rclick'):
+            if isinstance(target, str):
+                return f"auto.do().{action}({target!r})"
+            elif target is None:
+                return f"auto.do().{action}()"
+            else:
+                return f"auto.do().{action}({target}, {kwargs.get('y', '')})"
+        elif action == 'write':
+            return f'auto.do().write("{target}")'
+        elif action == 'press':
+            times = kwargs.get('times', 1)
+            return f'auto.do().press("{target}", times={times})'
+        elif action == 'hotkey':
+            keys = "+".join(target)
+            return f'auto.do().hotkey({keys})'
+        elif action == 'wait':
+            return f'auto.do().wait("{target}")'
+        elif action == 'wait_not':
+            return f'auto.do().wait_not("{target}")'
+        elif action == 'pause':
+            return f'auto.do().pause({target})'
+        elif action == 'if_start':
+            return f'auto.do().if_see("{target}")'
+        elif action == 'if_not_start':
+            return f'auto.do().if_not_see("{target}")'
+        elif action == 'else':
+            return 'auto.do().else_do()'
+        elif action == 'endif':
+            return 'auto.do().endif()'
+        elif action == 'for_start':
+            return 'auto.do().for_data(...)'
+        elif action == 'for_end':
+            return 'auto.do().end_for()'
+        else:
+            return f'auto.do().{action}({target})'
 
     def _execute_steps(self, steps):
         i = 0
         while i < len(steps):
             action, target, kwargs = steps[i]
+            # 调试录像：在执行前截图（仅水印）
+            if self._debug_recorder and self._debug_recorder.enabled:
+                code = self._make_action_str(action, target, kwargs)
+                self._debug_recorder.capture(code)
+
             if self._step_mode:
                 input(f"[单步] 即将执行: {action}({target})，按回车继续...")
 
@@ -1040,6 +1089,11 @@ class Flow:
             i = start_idx + 1
             while i < loop_end:
                 action, target, kwargs = steps[i]
+
+                # 循环内的步骤也需要调试截图
+                if self._debug_recorder and self._debug_recorder.enabled:
+                    code = self._make_action_str(action, target, kwargs)
+                    self._debug_recorder.capture(code)
 
                 if action in ('if_start', 'if_not_start', 'else', 'endif'):
                     skip_to = self._handle_conditional(steps, i)
@@ -1340,7 +1394,245 @@ def capture_template_simple(name):
 
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
-# ║                    主用户接口类 _Auto                                       ║
+# ║                 调试录像模块 DebugRecorder（自动启动，毫秒时间戳命名）        ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
+
+class DebugRecorder:
+    """调试录像模块：自动截图、水印、焦点标记。总开关：enabled"""
+
+    def __init__(self):
+        self.enabled = True
+        self.max_screenshots = 15
+        self.max_age_days = 7
+        self._lock = threading.Lock()
+        self._task_name = None
+        self._task_dir = None
+        self._counter = 0
+        self._is_failure = False
+        self.font_en = None
+        self.font_cn = None
+        self._font_valid = False
+        self._max_failed_tasks = 5
+        self._init_font()
+
+    def _auto_start(self):
+        """自动启动录像：以调用脚本名创建[脚本名_操作截屏]文件夹"""
+        import __main__
+        try:
+            script_path = os.path.abspath(__main__.__file__)
+        except AttributeError:
+            # 交互式环境
+            script_path = os.path.join(os.getcwd(), 'unknown_script.py')
+        script_dir = os.path.dirname(script_path)
+        script_name = os.path.splitext(os.path.basename(script_path))[0]
+        self._task_name = script_name
+        self._task_dir = os.path.join(script_dir, f"{script_name}_操作截屏")
+        os.makedirs(self._task_dir, exist_ok=True)
+        print(f"调试录像已自动启动，截图保存在: {self._task_dir}")
+
+    def start(self, task_name=None):
+        """手动启动录像（可自定义任务名）"""
+        if not self.enabled:
+            return
+        with self._lock:
+            if task_name:
+                self._task_name = task_name
+            else:
+                import __main__
+                main_file = getattr(__main__, '__file__', 'unknown_script')
+                self._task_name = os.path.splitext(os.path.basename(main_file))[0] or "未命名任务"
+            script_dir = os.path.dirname(os.path.abspath(__main__.__file__)) if hasattr(__main__, '__file__') else os.getcwd()
+            self._task_dir = os.path.join(script_dir, f"{self._task_name}_操作截屏")
+            os.makedirs(self._task_dir, exist_ok=True)
+            self._counter = 0
+            self._is_failure = False
+            print(f"调试录像已手动启动: {self._task_dir}")
+
+    def _init_font(self):
+        """预检并加载中英文字体"""
+        self.font_en = None
+        self.font_cn = None
+        try:
+            self.font_en = ImageFont.truetype("consola.ttf", 16)
+        except:
+            try:
+                self.font_en = ImageFont.truetype("cour.ttf", 16)
+            except:
+                try:
+                    self.font_en = ImageFont.load_default()
+                except:
+                    pass
+        try:
+            self.font_cn = ImageFont.truetype("msyh.ttc", 16)
+        except:
+            try:
+                self.font_cn = ImageFont.truetype("simsun.ttc", 16)
+            except:
+                self.font_cn = self.font_en
+        self._font_valid = self.font_en is not None
+
+    def _get_font(self, text):
+        """根据文本内容选择中英文字体"""
+        if self.font_cn and re.search(r'[\u4e00-\u9fff]', text):
+            return self.font_cn
+        return self.font_en if self.font_en else ImageFont.load_default()
+
+    def capture(self, action_code, focus_shape=None):
+        """截取当前屏幕，添加水印和可选的焦点标记，保存到任务目录"""
+        if not self.enabled:
+            return
+        # 自动启动
+        if self._task_dir is None:
+            self._auto_start()
+
+        with self._lock:
+            try:
+                screenshot = ImageGrab.grab()
+                if screenshot is None:
+                    return
+
+                # 绘制焦点形状（在加水印之前，避免被覆盖）
+                if focus_shape is not None:
+                    self._draw_focus_shape(screenshot, focus_shape)
+
+                # 添加水印
+                now = datetime.datetime.now()
+                now_str = now.strftime("%Y-%m-%d %H:%M:%S")
+                display_code = action_code if len(action_code) <= 50 else action_code[:47] + "..."
+                if self._is_failure:
+                    line2 = f"[{self._task_name}][失败] {display_code}"
+                else:
+                    line2 = f"[{self._task_name}] {display_code}"
+                watermarked = self._add_watermark(screenshot, now_str, line2)
+
+                # 生成毫秒时间戳文件名，处理冲突
+                base_name = f"capture_{now.strftime('%Y%m%d%H%M%S%f')[:-3]}"  # 截掉最后三位微秒转毫秒
+                filepath = os.path.join(self._task_dir, f"{base_name}.png")
+                suffix = 1
+                while os.path.exists(filepath):
+                    filepath = os.path.join(self._task_dir, f"{base_name}_{suffix}.png")
+                    suffix += 1
+
+                watermarked.save(filepath)
+                self._counter += 1
+
+                # 实时清理（失败时不限制数量）
+                if not self._is_failure:
+                    self._enforce_limit()
+
+            except Exception as e:
+                logger.debug(f"调试截图失败: {e}")
+
+    def _draw_focus_shape(self, image, shape):
+        """根据形状字典在图片上绘制焦点标记：圆圈或矩形"""
+        if shape is None:
+            return
+        scale = get_scale_factor()
+        draw = ImageDraw.Draw(image)
+        try:
+            if shape['type'] == 'circle':
+                x, y = shape['center']
+                rx, ry = logical_to_real(x, y, scale)
+                r_outer = max(1, int(25 * scale))
+                r_inner = max(1, int(20 * scale))
+                # 外红圆
+                bbox_outer = [rx - r_outer, ry - r_outer, rx + r_outer, ry + r_outer]
+                draw.ellipse(bbox_outer, outline='red', width=max(2, int(2*scale)))
+                # 内白圆
+                bbox_inner = [rx - r_inner, ry - r_inner, rx + r_inner, ry + r_inner]
+                draw.ellipse(bbox_inner, outline='white', width=max(1, int(1*scale)))
+            elif shape['type'] == 'rectangle':
+                left, top = logical_to_real(shape['left'], shape['top'], scale)
+                w = int(shape['width'] * scale)
+                h = int(shape['height'] * scale)
+                bbox = [left, top, left + w, top + h]
+                draw.rectangle(bbox, outline='red', width=max(3, int(3*scale)))
+        except:
+            pass
+
+    def _add_watermark(self, image, line1, line2):
+        """在图片右下角添加白字黑边水印，自动适配中英文字体"""
+        draw = ImageDraw.Draw(image)
+        font1 = self._get_font(line1)
+        font2 = self._get_font(line2)
+        margin = 10
+        try:
+            bbox1 = draw.textbbox((0, 0), line1, font=font1)
+            w1, h1 = bbox1[2] - bbox1[0], bbox1[3] - bbox1[1]
+            bbox2 = draw.textbbox((0, 0), line2, font=font2)
+            w2, h2 = bbox2[2] - bbox2[0], bbox2[3] - bbox2[1]
+        except AttributeError:
+            w1, h1 = draw.textsize(line1, font=font1)
+            w2, h2 = draw.textsize(line2, font=font2)
+        total_height = h1 + h2 + 5
+        max_width = max(w1, w2)
+        img_w, img_h = image.size
+        x = img_w - max_width - margin
+        y = img_h - total_height - margin
+        offsets = [(-1,-1), (-1,1), (1,-1), (1,1)]
+        for dx, dy in offsets:
+            draw.text((x+dx, y+dy), line1, font=font1, fill="black")
+            draw.text((x+dx, y+dy+h1+5), line2, font=font2, fill="black")
+        draw.text((x, y), line1, font=font1, fill="white")
+        draw.text((x, y+h1+5), line2, font=font2, fill="white")
+        return image
+
+    def _enforce_limit(self):
+        if not self._task_dir:
+            return
+        try:
+            # 按文件名（时间戳）排序，保留最新的 max_screenshots 张
+            files = [f for f in os.listdir(self._task_dir) if f.startswith("capture_") and f.endswith(".png")]
+            files.sort()  # 字符串排序即时间顺序
+            while len(files) > self.max_screenshots:
+                oldest = files.pop(0)
+                os.remove(os.path.join(self._task_dir, oldest))
+        except Exception as e:
+            logger.debug(f"清理截图失败: {e}")
+
+    def success(self):
+        if not self.enabled or not self._task_dir:
+            return
+        with self._lock:
+            self._enforce_limit()
+            print(f"录像任务正常结束，保留最近 {min(self.max_screenshots, self._counter)} 张截图")
+
+    def failure(self, error_msg=""):
+        if not self.enabled or not self._task_dir:
+            return
+        with self._lock:
+            self._is_failure = True
+            try:
+                screenshot = ImageGrab.grab()
+                if screenshot:
+                    now = datetime.datetime.now()
+                    now_str = now.strftime("%Y-%m-%d %H:%M:%S")
+                    msg_display = error_msg[:47] + "..." if len(error_msg) > 50 else error_msg
+                    line2 = f"[{self._task_name}][失败] {msg_display}"
+                    watermarked = self._add_watermark(screenshot, now_str, line2)
+                    base_name = f"failure_{now.strftime('%Y%m%d%H%M%S%f')[:-3]}"
+                    failure_path = os.path.join(self._task_dir, f"{base_name}.png")
+                    watermarked.save(failure_path)
+            except Exception as e:
+                logger.debug(f"失败截图保存失败: {e}")
+            self._write_error_summary(error_msg)
+
+    def _write_error_summary(self, error_msg):
+        if not self._task_dir:
+            return
+        summary_path = os.path.join(self._task_dir, "error_summary.txt")
+        try:
+            with open(summary_path, 'w', encoding='utf-8') as f:
+                f.write(f"任务名称: {self._task_name}\n")
+                f.write(f"失败时间: {datetime.datetime.now()}\n")
+                f.write(f"错误信息: {error_msg}\n")
+                f.write(f"截图数量: {self._counter}\n")
+        except Exception as e:
+            logger.debug(f"写入错误摘要失败: {e}")
+
+
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║                    主用户接口类 _Auto (集成录像调用)                         ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
 class _Auto:
@@ -1354,9 +1646,18 @@ class _Auto:
         self.debug = _DebugTools(self._recorder)
         self._step_mode = False
         self._step_pace = 0
+        # 调试录像记录器（默认开启，自动启动）
+        self.recorder = DebugRecorder()
+
+    # ===== 通用暂停 =====
+    def delay(self, seconds=1.0):
+        """暂停指定秒数（封装 time.sleep）"""
+        time.sleep(float(seconds))
 
     # ===== 屏幕截图 =====
     def shot(self, filename="screenshot"):
+        if self.recorder.enabled:
+            self.recorder.capture(f'auto.shot("{filename}")')
         path = os.path.join(_base_dir, Config.screenshot_dir, f"{filename}_{time.strftime('%H%M%S')}.png")
         ImageGrab.grab().save(path)
         logger.info(f"截图已保存: {path}")
@@ -1364,6 +1665,8 @@ class _Auto:
         return path
 
     def snip(self, x, y, w, h, filename="region"):
+        if self.recorder.enabled:
+            self.recorder.capture(f'auto.snip({x},{y},{w},{h},"{filename}")')
         path = os.path.join(_base_dir, Config.screenshot_dir, f"{filename}_{time.strftime('%H%M%S')}.png")
         ImageGrab.grab(bbox=(int(x), int(y), int(x + w), int(y + h))).save(path)
         logger.info(f"区域截图已保存: {path}")
@@ -1371,37 +1674,61 @@ class _Auto:
         return path
 
     # ===== 鼠标操作 =====
-    def move(self, x, y):
+    def moveto(self, x, y):
+        """移动鼠标到指定坐标"""
+        if self.recorder.enabled:
+            self.recorder.capture(f'auto.moveto({x}, {y})', focus_shape={'type':'circle', 'center':(x, y)})
         mouse_moveto(int(x), int(y))
+
+    # 别名
+    move = moveto
 
     def click(self, *args):
         if not args:
+            if self.recorder.enabled:
+                x, y = get_mouse_point()
+                self.recorder.capture("auto.click()", focus_shape={'type':'circle', 'center':(x, y)})
             x, y = get_mouse_point()
             mouse_left_click(x, y)
         elif len(args) == 1 and isinstance(args[0], str):
+            # 找图点击，截图由 _click_by_image 内部处理
             self._click_by_image(args[0])
         elif len(args) >= 2:
+            if self.recorder.enabled:
+                self.recorder.capture(f"auto.click({args[0]}, {args[1]})", focus_shape={'type':'circle', 'center':(args[0], args[1])})
             mouse_left_click(int(args[0]), int(args[1]))
 
     def dclick(self, *args):
         if not args:
+            if self.recorder.enabled:
+                x, y = get_mouse_point()
+                self.recorder.capture("auto.dclick()", focus_shape={'type':'circle', 'center':(x, y)})
             x, y = get_mouse_point()
             mouse_left_click(x, y, k=2)
         elif len(args) == 1 and isinstance(args[0], str):
             self._click_by_image(args[0], clicks=2)
         elif len(args) >= 2:
+            if self.recorder.enabled:
+                self.recorder.capture(f"auto.dclick({args[0]}, {args[1]})", focus_shape={'type':'circle', 'center':(args[0], args[1])})
             mouse_left_click(int(args[0]), int(args[1]), k=2)
 
     def rclick(self, *args):
         if not args:
+            if self.recorder.enabled:
+                x, y = get_mouse_point()
+                self.recorder.capture("auto.rclick()", focus_shape={'type':'circle', 'center':(x, y)})
             x, y = get_mouse_point()
             mouse_right_click(x, y)
         elif len(args) == 1 and isinstance(args[0], str):
             self._click_by_image(args[0], right_click=True)
         elif len(args) >= 2:
+            if self.recorder.enabled:
+                self.recorder.capture(f"auto.rclick({args[0]}, {args[1]})", focus_shape={'type':'circle', 'center':(args[0], args[1])})
             mouse_right_click(int(args[0]), int(args[1]))
 
     def drag(self, x1, y1, x2, y2):
+        if self.recorder.enabled:
+            self.recorder.capture(f'auto.drag({x1},{y1},{x2},{y2})', focus_shape={'type':'circle', 'center':(x1, y1)})
         drag_mouse(int(x1), int(y1), int(x2), int(y2))
 
     def pos(self):
@@ -1416,53 +1743,81 @@ class _Auto:
             print("\n已停止。")
 
     def _click_by_image(self, tempname, clicks=1, right_click=False):
+        """找图点击，负责录像截图（含矩形标记）"""
+        action_code = f"auto.{'rclick' if right_click else 'dclick' if clicks>1 else 'click'}(\"{tempname}\")"
         start_time = time.time()
-        coords = self._locator.find(tempname)
 
-        if coords == (-1, -1):
+        # 找图
+        coords = self._locator.find(tempname)
+        scale = self._locator.get_scale_factor()
+        if coords != (-1, -1):
+            # 成功：截取操作前画面并画矩形
+            lx, ly = coords
+            tw, th = self._locator.get_template_size()
+            tw_logic = int(tw / scale)
+            th_logic = int(th / scale)
+            shape = {'type': 'rectangle', 'left': lx, 'top': ly, 'width': tw_logic, 'height': th_logic}
+            if self.recorder.enabled:
+                self.recorder.capture(action_code, focus_shape=shape)
+
+            # 执行点击
+            cx, cy = int(lx + tw_logic/2), int(ly + th_logic/2)
+            if right_click:
+                mouse_right_click(cx, cy)
+            else:
+                mouse_left_click(cx, cy, k=clicks)
+            time.sleep(Config.post_click_delay)
+            self._recorder.record('click', tempname, True, time.time() - start_time)
+            return True
+        else:
+            # 失败：截取现场画面（无标记）
+            if self.recorder.enabled:
+                self.recorder.capture(action_code, focus_shape=None)
             self._error_handler.save_error_screenshot(tempname)
             print(self._error_handler.format_error_message(tempname, Config.default_similarity, Config.default_timeout))
             self._recorder.record('click', tempname, False, time.time() - start_time)
             return False
 
-        cx, cy = int(coords[0]), int(coords[1])
-
-        if right_click:
-            mouse_right_click(cx, cy)
-            action = 'rclick'
-        else:
-            mouse_left_click(cx, cy, k=clicks)
-            action = 'dclick' if clicks > 1 else 'click'
-
-        time.sleep(Config.post_click_delay)
-        self._recorder.record(action, tempname, True, time.time() - start_time)
-        logger.info(f"{action} '{tempname}' at ({cx},{cy})")
-        return True
-
     # ===== 键盘操作 =====
     def write(self, text, times=1):
+        if self.recorder.enabled:
+            display = str(text)[:47] + '...' if len(str(text)) > 50 else str(text)
+            self.recorder.capture(f'auto.write("{display}", times={times})')
         saystring(str(text), k=times)
 
     def press(self, key_name, times=1):
+        if self.recorder.enabled:
+            self.recorder.capture(f'auto.press("{key_name}", times={times})')
         key_press(str(key_name), k=times)
 
     def hotkey(self, *keys):
+        if self.recorder.enabled:
+            keys_str = '+'.join(keys)
+            self.recorder.capture(f'auto.hotkey({keys_str})')
         key_press_plus([str(k).lower() for k in keys])
 
     def press_sequence(self, *keys):
+        if self.recorder.enabled:
+            seq = ', '.join(keys)
+            self.recorder.capture(f'auto.press_sequence({seq})')
         for k in keys:
             key_press(str(k))
             time.sleep(0.05)
 
     # ===== 图像识别 =====
     def find(self, tempname, timeout=None, similarity=None, rect=None):
+        if self.recorder.enabled:
+            self.recorder.capture(f'auto.find("{tempname}")')
         return self._locator.find(tempname, timeout=timeout, area=rect)
 
     def find_all(self, tempname, timeout=None, similarity=None, rect=None):
-        """查找所有匹配目标，返回逻辑坐标列表 [(x, y), ...]"""
+        if self.recorder.enabled:
+            self.recorder.capture(f'auto.find_all("{tempname}")')
         return self._locator.find_all(tempname, timeout=timeout, area=rect)
- 
+
     def wait(self, tempname, timeout=30):
+        if self.recorder.enabled:
+            self.recorder.capture(f'auto.wait("{tempname}", timeout={timeout})')
         logger.info(f"等待 '{tempname}' 出现（超时={timeout}s）...")
         print(f"等待 '{tempname}' 出现...")
         result = self._locator.find(tempname, timeout=timeout)
@@ -1474,6 +1829,8 @@ class _Auto:
             return False
 
     def wait_not(self, tempname, timeout=30):
+        if self.recorder.enabled:
+            self.recorder.capture(f'auto.wait_not("{tempname}", timeout={timeout})')
         logger.info(f"等待 '{tempname}' 消失（超时={timeout}s）...")
         print(f"等待 '{tempname}' 消失...")
         start = time.time()
@@ -1498,7 +1855,7 @@ class _Auto:
 
     # ===== 流程引擎 =====
     def do(self):
-        flow = Flow(self._locator, self._recorder, self._error_handler)
+        flow = Flow(self._locator, self._recorder, self._error_handler, debug_recorder=self.recorder)
         flow._step_mode = self._step_mode
         flow._step_pace = self._step_pace
         return flow
@@ -1521,6 +1878,8 @@ class _Auto:
 
     # ===== 截图工具 =====
     def capture(self, name):
+        if self.recorder.enabled:
+            self.recorder.capture(f'auto.capture("{name}")')
         return capture_template_simple(name)
 
     # ===== 帮助 =====
@@ -1553,7 +1912,7 @@ if __name__ == "__main__":
     print("=" * 60)
     print("\n助手已就绪。")
 
-    # 以下为完整使用手册（原脚本中的长篇文档，已更新名称和版本）
+    # 完整使用手册
     print('''
 ╔══════════════════════════════════════════════════════════════════════╗
 ║              ImgClickFlow 办公助手 — 完整使用手册                   ║
@@ -1622,7 +1981,7 @@ if __name__ == "__main__":
 3.1 鼠标操作
 ────────────────────────────────────────────────────────────────────
 
-  auto.move(x, y)            移动鼠标到逻辑坐标
+  auto.moveto(x, y)            移动鼠标到逻辑坐标
   auto.click()               左键单击（三种用法：无参数/坐标/图片名）
   auto.dclick()              双击
   auto.rclick()              右键单击
@@ -1636,6 +1995,7 @@ if __name__ == "__main__":
   auto.press(key, times=1)        按下并释放单个键
   auto.hotkey(k1,k2,...)          组合键
   auto.press_sequence(*keys)      依次按下多个键
+  auto.delay(seconds)             暂停指定秒数（无需导入 time）
 
   常用键名：enter, tab, esc, spacebar, backspace, del, ins,
            F1~F12, up_arrow, down_arrow, left_arrow, right_arrow,
@@ -1712,35 +2072,35 @@ if __name__ == "__main__":
 
 # 案例1：保存并关闭
 auto.click("保存按钮")
-time.sleep(1)
+auto.delay(1)
 auto.click("关闭按钮")
 
 # 案例2：链式新建文档并保存
-(auto.do()
+auto.do()
     .click("新建按钮")
     .write("文档内容")
     .click("保存")
-    .run())
+    .run()
 
 # 案例3：批量循环填写表格
 data = ["张三","李四","王五"]
-(auto.do()
+auto.do()
     .for_data(data)
         .click("姓名框")
         .write("{item}")
         .click("保存")
     .end_for()
-    .run())
+    .run()
 
 # 案例4：条件分支
-(auto.do()
+auto.do()
     .click("提交")
     .if_see("成功")
         .click("确定")
     .else_do()
         .click("重试")
     .endif()
-    .run())
+    .run()
 
 # 案例5：每日定时截图
 def daily_job():
@@ -1749,7 +2109,7 @@ def daily_job():
 auto.cron("17:30", daily_job)
 
 ═══════════════════════════════════════════════════════════════════════
-文档版本：v1.0    适用脚本：ImgClickFlow    最后更新：2026年5月
+文档版本：v1.1    适用脚本：ImgClickFlow    最后更新：2026年5月
 作者知乎：https://www.zhihu.com/people/mhaksy
 ═══════════════════════════════════════════════════════════════════════
 ''')
