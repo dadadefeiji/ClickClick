@@ -1,6 +1,6 @@
 # -*- coding: UTF-8 -*-
 """
- Copyright (c) 2026 yushihong. Licensed under the MIT License.
+ Copyright (c) 2026 yushihong. Licensed under the Apache-2.0 license.
  作者知乎主页：https://www.zhihu.com/people/mhaksy
 
 【10秒快速上手】
