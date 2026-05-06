@@ -485,7 +485,7 @@ auto.recorder.enabled = False
 
 ## 📄 许可证
 
-MIT License
+Apache-2.0 license
 
 作者知乎：https://www.zhihu.com/people/mhaksy
 项目地址：https://github.com/honggescripts/ImgClickFlow
