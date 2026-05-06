@@ -1155,14 +1155,32 @@ class Flow:
             return 'auto.do().end_for()'
         else:
             return f'auto.do().{action}({target})'
+    
+
+    def _debug_capture(self, action, target, kwargs, coords=None, size=None):
+        """录像截图，根据坐标和尺寸自动绘制焦点标记（矩形或圆圈）"""
+        if not self._debug_recorder or not self._debug_recorder.enabled:
+            return
+        code = self._make_action_str(action, target, kwargs)
+        shape = None
+        if coords is not None:
+            if size is not None:
+                shape = {
+                    'type': 'rectangle',
+                    'left': coords[0],
+                    'top': coords[1],
+                    'width': size[0],
+                    'height': size[1]
+                }
+            else:
+                shape = {'type': 'circle', 'center': coords}
+        self._debug_recorder.capture(code, focus_shape=shape)
+
 
     def _execute_steps(self, steps):
         i = 0
         while i < len(steps):
             action, target, kwargs = steps[i]
-            if self._debug_recorder and self._debug_recorder.enabled:
-                code = self._make_action_str(action, target, kwargs)
-                self._debug_recorder.capture(code)
 
             if self._step_mode:
                 input(f"[单步] 即将执行: {action}({target})，按回车继续...")
@@ -1281,61 +1299,103 @@ class Flow:
                 depth -= 1
         return None
 
+
     def _execute_single(self, action, target, kwargs):
         start_time = time.time()
         result = True
 
         try:
-            # ----- 鼠标移动 -----
+            # ----- 鼠标移动（不截图） -----
             if action == 'moveto':
                 x, y = target
                 mouse_moveto(int(x), int(y))
                 time.sleep(0.02)
 
-            # ----- 单次左键 -----
+            # ----- 单次左键（点击前截图+标记） -----
             elif action == 'click':
                 if isinstance(target, str):
-                    result = self.locator.click(target)
+                    coords = self.locator.find(target)
+                    if coords != (-1, -1):
+                        lx, ly = coords
+                        tw, th = self.locator.get_template_size()
+                        scale = self.locator.get_scale_factor()
+                        logic_w = tw / scale
+                        logic_h = th / scale
+                        # 截图+矩形标记
+                        self._debug_capture(action, target, kwargs,
+                                            coords=(lx, ly), size=(logic_w, logic_h))
+                        cx, cy = int(lx + logic_w / 2), int(ly + logic_h / 2)
+                        mouse_left_click(cx, cy)
+                    else:
+                        self._debug_capture(action, target, kwargs)  # 失败截图（无标记）
+                        result = False
                 elif isinstance(target, (int, float)):
-                    mouse_left_click(int(target), int(kwargs.get('y', 0)))
+                    x, y = int(target), int(kwargs.get('y', 0))
+                    self._debug_capture(action, target, kwargs, coords=(x, y))
+                    mouse_left_click(x, y)
                 else:
                     x, y = get_mouse_point()
+                    self._debug_capture(action, target, kwargs, coords=(x, y))
                     mouse_left_click(x, y)
 
-            # ----- 双击 -----
+            # ----- 双击（同 click） -----
             elif action == 'dclick':
                 if isinstance(target, str):
                     coords = self.locator.find(target)
                     if coords != (-1, -1):
-                        mouse_left_click(int(coords[0]), int(coords[1]), k=2)
+                        lx, ly = coords
+                        tw, th = self.locator.get_template_size()
+                        scale = self.locator.get_scale_factor()
+                        logic_w = tw / scale
+                        logic_h = th / scale
+                        self._debug_capture(action, target, kwargs,
+                                            coords=(lx, ly), size=(logic_w, logic_h))
+                        cx, cy = int(lx + logic_w / 2), int(ly + logic_h / 2)
+                        mouse_left_click(cx, cy, k=2)
                     else:
+                        self._debug_capture(action, target, kwargs)
                         result = False
                 elif isinstance(target, (int, float)):
-                    mouse_left_click(int(target), int(kwargs.get('y', 0)), k=2)
+                    x, y = int(target), int(kwargs.get('y', 0))
+                    self._debug_capture(action, target, kwargs, coords=(x, y))
+                    mouse_left_click(x, y, k=2)
                 else:
                     x, y = get_mouse_point()
+                    self._debug_capture(action, target, kwargs, coords=(x, y))
                     mouse_left_click(x, y, k=2)
 
-            # ----- 单次右键 -----
+            # ----- 右键（同 click） -----
             elif action == 'rclick':
                 if isinstance(target, str):
                     coords = self.locator.find(target)
                     if coords != (-1, -1):
-                        mouse_right_click(int(coords[0]), int(coords[1]))
+                        lx, ly = coords
+                        tw, th = self.locator.get_template_size()
+                        scale = self.locator.get_scale_factor()
+                        logic_w = tw / scale
+                        logic_h = th / scale
+                        self._debug_capture(action, target, kwargs,
+                                            coords=(lx, ly), size=(logic_w, logic_h))
+                        cx, cy = int(lx + logic_w / 2), int(ly + logic_h / 2)
+                        mouse_right_click(cx, cy)
                     else:
+                        self._debug_capture(action, target, kwargs)
                         result = False
                 elif isinstance(target, (int, float)):
-                    mouse_right_click(int(target), int(kwargs.get('y', 0)))
+                    x, y = int(target), int(kwargs.get('y', 0))
+                    self._debug_capture(action, target, kwargs, coords=(x, y))
+                    mouse_right_click(x, y)
                 else:
                     x, y = get_mouse_point()
+                    self._debug_capture(action, target, kwargs, coords=(x, y))
                     mouse_right_click(x, y)
 
-            # ----- 拖拽 -----
+            # ----- 拖拽（不截图） -----
             elif action == 'drag':
                 x1, y1, x2, y2 = target
                 drag_mouse(x1, y1, x2, y2, duration=kwargs.get('duration', 0.5))
 
-            # ----- 滚轮 -----
+            # ----- 滚轮（不截图） -----
             elif action == 'scroll':
                 direction = kwargs.get('direction', 'down')
                 clicks = int(kwargs.get('clicks', 3))
@@ -1343,7 +1403,7 @@ class Flow:
                 y = kwargs.get('y', None)
                 scroll_mouse(clicks, direction, x, y)
 
-            # ----- 截图 -----
+            # ----- 截图主动保存（本身是截图操作，无需录像） -----
             elif action == 'snap':
                 note = str(target) if target else ""
                 timestamp = time.strftime('%Y%m%d_%H%M%S')
@@ -1353,7 +1413,7 @@ class Flow:
                 logger.info(f"流程截图已保存: {path}")
                 print(f"流程截图已保存: {path}")
 
-            # ----- 多次左键 -----
+            # ----- 多次左键（截图+标记） -----
             elif action == 'click_multi':
                 k = int(kwargs.get('k', 1))
                 wait_time = float(kwargs.get('wait', 0.0))
@@ -1365,6 +1425,8 @@ class Flow:
                         scale = self.locator.get_scale_factor()
                         logic_w = tw / scale
                         logic_h = th / scale
+                        self._debug_capture('click_multi', target, kwargs,
+                                            coords=(lx, ly), size=(logic_w, logic_h))
                         cx = int(lx + logic_w / 2)
                         cy = int(ly + logic_h / 2)
                         for i in range(k):
@@ -1373,10 +1435,12 @@ class Flow:
                                 time.sleep(wait_time)
                         result = True
                     else:
+                        self._debug_capture('click_multi', target, kwargs)
                         result = False
                 elif isinstance(target, (int, float)):
                     x = int(target)
                     y = int(kwargs.get('y', 0))
+                    self._debug_capture('click_multi', target, kwargs, coords=(x, y))
                     for i in range(k):
                         mouse_left_click(x, y)
                         if i < k - 1 and wait_time > 0:
@@ -1384,32 +1448,46 @@ class Flow:
                     result = True
                 else:
                     x, y = get_mouse_point()
+                    self._debug_capture('click_multi', target, kwargs, coords=(x, y))
                     for i in range(k):
                         mouse_left_click(x, y)
                         if i < k - 1 and wait_time > 0:
                             time.sleep(wait_time)
                     result = True
 
-            # ----- 连续点击序列 -----
+            # ----- 连续点击序列（每个点击前截图+标记） -----
             elif action == 'click_seq':
                 wait_time = float(kwargs.get('wait', 0.2))
                 targets_list = target if isinstance(target, list) else []
                 for idx, t in enumerate(targets_list):
                     if isinstance(t, str):
-                        ok = self.locator.click(t)
-                        if not ok:
+                        coords = self.locator.find(t)
+                        if coords != (-1, -1):
+                            lx, ly = coords
+                            tw, th = self.locator.get_template_size()
+                            scale = self.locator.get_scale_factor()
+                            logic_w = tw / scale
+                            logic_h = th / scale
+                            self._debug_capture('click', t, {},
+                                                coords=(lx, ly), size=(logic_w, logic_h))
+                            cx, cy = int(lx + logic_w / 2), int(ly + logic_h / 2)
+                            mouse_left_click(cx, cy)
+                        else:
+                            self._debug_capture('click', t, {})
                             result = False
                             break
                     elif isinstance(t, (tuple, list)) and len(t) >= 2:
-                        mouse_left_click(int(t[0]), int(t[1]))
+                        x, y = int(t[0]), int(t[1])
+                        self._debug_capture('click', t, {}, coords=(x, y))
+                        mouse_left_click(x, y)
                     else:
-                        logger.warning(f"click_seq 中的目标格式不支持: {t}")
+                        logger.warning(f"click_seq 目标格式不支持: {t}")
                         result = False
                         break
                     if idx < len(targets_list) - 1:
                         time.sleep(wait_time)
 
-            # ----- 候补点击 -----
+            # ----- 候补点击（命中时截图+标记，失败也截图） -----
             elif action == 'click_any':
                 timeout_val = kwargs.get('timeout') or Config.default_timeout
                 wait_val = float(kwargs.get('wait', 0.1))
@@ -1419,36 +1497,40 @@ class Flow:
                 while time.time() - start < timeout_val:
                     for t in targets_list:
                         if isinstance(t, str):
-                            # 极短时间查找，不阻塞
                             coords = self.locator.find(t, timeout=0.01)
                             if coords != (-1, -1):
-                                # 定位成功，点击中心
                                 lx, ly = coords
                                 tw, th = self.locator.get_template_size()
                                 scale = self.locator.get_scale_factor()
                                 logic_w = tw / scale
                                 logic_h = th / scale
-                                cx = int(lx + logic_w / 2)
-                                cy = int(ly + logic_h / 2)
+                                self._debug_capture('click', t, {},
+                                                    coords=(lx, ly), size=(logic_w, logic_h))
+                                cx, cy = int(lx + logic_w / 2), int(ly + logic_h / 2)
                                 mouse_left_click(cx, cy)
                                 found = True
                                 break
                         elif isinstance(t, (tuple, list)) and len(t) >= 2:
-                            mouse_left_click(int(t[0]), int(t[1]))
+                            x, y = int(t[0]), int(t[1])
+                            self._debug_capture('click', t, {}, coords=(x, y))
+                            mouse_left_click(x, y)
                             found = True
                             break
                     if found:
                         result = True
                         break
-                    # 本轮未命中，等待后继续轮询
                     if time.time() - start < timeout_val:
                         time.sleep(wait_val)
                 if not found:
+                    self._debug_capture(action, target, kwargs)  # 失败截图
                     result = False
 
-            # ----- 其他操作 -----
+            # ----- 文本输入（输入前截图，无标记） -----
             elif action == 'write':
+                self._debug_capture(action, target, kwargs)  # 界面状态截图
                 saystring(str(target))
+
+            # ----- 以下操作均不截图 -----
             elif action == 'press':
                 times = kwargs.get('times', 1)
                 key_press(str(target), k=times)
@@ -1482,7 +1564,6 @@ class Flow:
                     self.error_handler.save_error_screenshot(target)
                     print(self.error_handler.format_error_message(target, Config.default_similarity, Config.default_timeout))
                 elif action == 'click_any':
-                    # 输出所有未找到的模板名
                     names = [str(t) for t in target if isinstance(t, str)]
                     if names:
                         print(f"✗ 查找 {names} 图片失败，流程终止")
@@ -1494,6 +1575,220 @@ class Flow:
                 print(f"操作 {action} 失败")
 
         return result
+
+    # def _execute_single(self, action, target, kwargs):
+    #     start_time = time.time()
+    #     result = True
+
+    #     try:
+    #         # ----- 鼠标移动 -----
+    #         if action == 'moveto':
+    #             x, y = target
+    #             mouse_moveto(int(x), int(y))
+    #             time.sleep(0.02)
+
+    #         # ----- 单次左键 -----
+    #         elif action == 'click':
+    #             if isinstance(target, str):
+    #                 result = self.locator.click(target)
+    #             elif isinstance(target, (int, float)):
+    #                 mouse_left_click(int(target), int(kwargs.get('y', 0)))
+    #             else:
+    #                 x, y = get_mouse_point()
+    #                 mouse_left_click(x, y)
+
+    #         # ----- 双击 -----
+    #         elif action == 'dclick':
+    #             if isinstance(target, str):
+    #                 coords = self.locator.find(target)
+    #                 if coords != (-1, -1):
+    #                     mouse_left_click(int(coords[0]), int(coords[1]), k=2)
+    #                 else:
+    #                     result = False
+    #             elif isinstance(target, (int, float)):
+    #                 mouse_left_click(int(target), int(kwargs.get('y', 0)), k=2)
+    #             else:
+    #                 x, y = get_mouse_point()
+    #                 mouse_left_click(x, y, k=2)
+
+    #         # ----- 单次右键 -----
+    #         elif action == 'rclick':
+    #             if isinstance(target, str):
+    #                 coords = self.locator.find(target)
+    #                 if coords != (-1, -1):
+    #                     mouse_right_click(int(coords[0]), int(coords[1]))
+    #                 else:
+    #                     result = False
+    #             elif isinstance(target, (int, float)):
+    #                 mouse_right_click(int(target), int(kwargs.get('y', 0)))
+    #             else:
+    #                 x, y = get_mouse_point()
+    #                 mouse_right_click(x, y)
+
+    #         # ----- 拖拽 -----
+    #         elif action == 'drag':
+    #             x1, y1, x2, y2 = target
+    #             drag_mouse(x1, y1, x2, y2, duration=kwargs.get('duration', 0.5))
+
+    #         # ----- 滚轮 -----
+    #         elif action == 'scroll':
+    #             direction = kwargs.get('direction', 'down')
+    #             clicks = int(kwargs.get('clicks', 3))
+    #             x = kwargs.get('x', None)
+    #             y = kwargs.get('y', None)
+    #             scroll_mouse(clicks, direction, x, y)
+
+    #         # ----- 截图 -----
+    #         elif action == 'snap':
+    #             note = str(target) if target else ""
+    #             timestamp = time.strftime('%Y%m%d_%H%M%S')
+    #             filename = f"snap_{timestamp}_{note}.png" if note else f"snap_{timestamp}.png"
+    #             path = os.path.join(_base_dir, Config.screenshot_dir, filename)
+    #             ImageGrab.grab().save(path)
+    #             logger.info(f"流程截图已保存: {path}")
+    #             print(f"流程截图已保存: {path}")
+
+    #         # ----- 多次左键 -----
+    #         elif action == 'click_multi':
+    #             k = int(kwargs.get('k', 1))
+    #             wait_time = float(kwargs.get('wait', 0.0))
+    #             if isinstance(target, str):
+    #                 coords = self.locator.find(target)
+    #                 if coords != (-1, -1):
+    #                     lx, ly = coords
+    #                     tw, th = self.locator.get_template_size()
+    #                     scale = self.locator.get_scale_factor()
+    #                     logic_w = tw / scale
+    #                     logic_h = th / scale
+    #                     cx = int(lx + logic_w / 2)
+    #                     cy = int(ly + logic_h / 2)
+    #                     for i in range(k):
+    #                         mouse_left_click(cx, cy)
+    #                         if i < k - 1 and wait_time > 0:
+    #                             time.sleep(wait_time)
+    #                     result = True
+    #                 else:
+    #                     result = False
+    #             elif isinstance(target, (int, float)):
+    #                 x = int(target)
+    #                 y = int(kwargs.get('y', 0))
+    #                 for i in range(k):
+    #                     mouse_left_click(x, y)
+    #                     if i < k - 1 and wait_time > 0:
+    #                         time.sleep(wait_time)
+    #                 result = True
+    #             else:
+    #                 x, y = get_mouse_point()
+    #                 for i in range(k):
+    #                     mouse_left_click(x, y)
+    #                     if i < k - 1 and wait_time > 0:
+    #                         time.sleep(wait_time)
+    #                 result = True
+
+    #         # ----- 连续点击序列 -----
+    #         elif action == 'click_seq':
+    #             wait_time = float(kwargs.get('wait', 0.2))
+    #             targets_list = target if isinstance(target, list) else []
+    #             for idx, t in enumerate(targets_list):
+    #                 if isinstance(t, str):
+    #                     ok = self.locator.click(t)
+    #                     if not ok:
+    #                         result = False
+    #                         break
+    #                 elif isinstance(t, (tuple, list)) and len(t) >= 2:
+    #                     mouse_left_click(int(t[0]), int(t[1]))
+    #                 else:
+    #                     logger.warning(f"click_seq 中的目标格式不支持: {t}")
+    #                     result = False
+    #                     break
+    #                 if idx < len(targets_list) - 1:
+    #                     time.sleep(wait_time)
+
+    #         # ----- 候补点击 -----
+    #         elif action == 'click_any':
+    #             timeout_val = kwargs.get('timeout') or Config.default_timeout
+    #             wait_val = float(kwargs.get('wait', 0.1))
+    #             targets_list = target if isinstance(target, list) else []
+    #             start = time.time()
+    #             found = False
+    #             while time.time() - start < timeout_val:
+    #                 for t in targets_list:
+    #                     if isinstance(t, str):
+    #                         # 极短时间查找，不阻塞
+    #                         coords = self.locator.find(t, timeout=0.01)
+    #                         if coords != (-1, -1):
+    #                             # 定位成功，点击中心
+    #                             lx, ly = coords
+    #                             tw, th = self.locator.get_template_size()
+    #                             scale = self.locator.get_scale_factor()
+    #                             logic_w = tw / scale
+    #                             logic_h = th / scale
+    #                             cx = int(lx + logic_w / 2)
+    #                             cy = int(ly + logic_h / 2)
+    #                             mouse_left_click(cx, cy)
+    #                             found = True
+    #                             break
+    #                     elif isinstance(t, (tuple, list)) and len(t) >= 2:
+    #                         mouse_left_click(int(t[0]), int(t[1]))
+    #                         found = True
+    #                         break
+    #                 if found:
+    #                     result = True
+    #                     break
+    #                 # 本轮未命中，等待后继续轮询
+    #                 if time.time() - start < timeout_val:
+    #                     time.sleep(wait_val)
+    #             if not found:
+    #                 result = False
+
+    #         # ----- 其他操作 -----
+    #         elif action == 'write':
+    #             saystring(str(target))
+    #         elif action == 'press':
+    #             times = kwargs.get('times', 1)
+    #             key_press(str(target), k=times)
+    #         elif action == 'hotkey':
+    #             key_press_plus(list(target))
+    #         elif action == 'wait':
+    #             timeout = kwargs.get('timeout') or Config.default_timeout
+    #             result = self.locator.find(target, timeout=timeout) != (-1, -1)
+    #         elif action == 'wait_not':
+    #             timeout = kwargs.get('timeout') or Config.default_timeout
+    #             start = time.time()
+    #             while time.time() - start < timeout:
+    #                 if self.locator.find(target, timeout=1) == (-1, -1):
+    #                     result = True
+    #                     break
+    #                 time.sleep(0.5)
+    #             else:
+    #                 result = False
+    #         elif action == 'pause':
+    #             time.sleep(float(target))
+    #     except Exception as e:
+    #         logger.error(f"操作异常: {action}({target}) - {e}")
+    #         result = False
+
+    #     duration = time.time() - start_time
+    #     self.recorder.record(action, target, result, duration)
+
+    #     if not result and action not in ('wait', 'wait_not', 'pause'):
+    #         if action in ('click', 'dclick', 'rclick', 'click_multi', 'click_seq', 'click_any'):
+    #             if isinstance(target, str):
+    #                 self.error_handler.save_error_screenshot(target)
+    #                 print(self.error_handler.format_error_message(target, Config.default_similarity, Config.default_timeout))
+    #             elif action == 'click_any':
+    #                 # 输出所有未找到的模板名
+    #                 names = [str(t) for t in target if isinstance(t, str)]
+    #                 if names:
+    #                     print(f"✗ 查找 {names} 图片失败，流程终止")
+    #                 else:
+    #                     print("✗ click_any 未找到任何目标，流程终止")
+    #             else:
+    #                 print(f"操作 {action} 失败")
+    #         else:
+    #             print(f"操作 {action} 失败")
+
+    #     return result
 
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
@@ -2070,28 +2365,36 @@ class _Auto:
                     time.sleep(wait)
         time.sleep(Config.post_click_delay)
 
+
     def click_seq(self, targets, wait=0.2):
         """
         依次点击多个目标（支持图片名与坐标混合）
+        每个目标点击时都会触发调试截图，图片目标画红色方框，坐标目标画红色圆圈
         用法：
             auto.click_seq(["登录", "确定", "欢迎页面"])
             auto.click_seq([(100,200), (300,400)])
             auto.click_seq(["登录", (100,200)], wait=0.5)
         """
-        if self.recorder.enabled:
-            self.recorder.capture(f"auto.click_seq({targets!r}, wait={wait})")
         for idx, t in enumerate(targets):
             if isinstance(t, str):
                 if not self._click_by_image(t):
                     print(f"✗ 查找{t}图片失败，流程终止")
                     return
             elif isinstance(t, (tuple, list)) and len(t) >= 2:
-                mouse_left_click(int(t[0]), int(t[1]))
+                x, y = int(t[0]), int(t[1])
+                # 为坐标点击生成带红色圆圈标记的调试截图
+                if self.recorder.enabled:
+                    self.recorder.capture(
+                        f"auto.click_seq 坐标({x},{y})",
+                        focus_shape={'type': 'circle', 'center': (x, y)}
+                    )
+                mouse_left_click(x, y)
             else:
                 logger.warning(f"click_seq 目标格式不支持: {t}")
             if idx < len(targets) - 1:
                 time.sleep(wait)
         time.sleep(Config.post_click_delay)
+    
 
     def click_any(self, targets, timeout=None, wait=0.1):
         """
