@@ -1,6 +1,4 @@
-
----
-
+```markdown
 # ImgClickFlow
 
 > 图像识别 + 流程编排 —— 让 Windows 办公自动化像写文章一样简单
@@ -96,7 +94,7 @@ auto.click("财务软件图标")
 auto.wait("登录界面", timeout=10)
 auto.write("admin")
 auto.click("导出报表")
-# 运行结束后，debug_screenshots/ 下自动生成截图文件夹
+# 运行结束后，[脚本名]_操作截屏 文件夹下会自动生成截图
 ```
 
 如果需要自定义任务名称或显式标记成功/失败，可调用以下**可选方法**：
@@ -169,9 +167,9 @@ auto.click("按钮名称")   # 自动找图并点击中心
 你的工作目录/
 ├── imgclickflow.py        # 主脚本（可改名）
 ├── templates/             # 按钮截图（PNG）存放处 —— 必须手动创建
-├── debug_screenshots/     # 操作自动截图（自动生成，默认开启）
+├── [脚本名]_操作截屏/      # 操作自动截图（默认开启，自动生成）
 ├── logs/                  # 运行日志（自动生成）
-├── screenshots/           # 手动截图保存（自动生成）
+├── screenshots_author/    # 手动/流程截图保存（自动生成）
 ├── error_snapshots/       # 识别失败时自动截图（自动生成）
 └── reports/               # HTML 执行报告（由 debug.report 生成）
 ```
@@ -186,7 +184,7 @@ auto.click("按钮名称")   # 自动找图并点击中心
 |------|--------|------|
 | `template_dir` | `"templates"` | 模板截图存放文件夹 |
 | `log_dir` | `"logs"` | 运行日志文件夹 |
-| `screenshot_dir` | `"screenshots"` | 手动截图保存路径 |
+| `screenshot_dir` | `"screenshots_author"` | 用户主动截图保存路径（`snap`等方法） |
 | `error_dir` | `"error_snapshots"` | 识别失败时自动截图保存路径 |
 | `default_similarity` | `0.9` | 图像匹配相似度（0~1，越高越严格） |
 | `default_timeout` | `10` | 找图默认超时时间（秒） |
@@ -211,11 +209,14 @@ auto.click("按钮名称")   # 自动找图并点击中心
 
 | 方法 | 说明 | 示例 |
 |------|------|------|
-| `auto.move(x, y)` | 移动鼠标到逻辑坐标 | `auto.move(500, 300)` |
+| `auto.move(x, y)` / `auto.moveto(x, y)` | 移动鼠标到逻辑坐标 | `auto.move(500, 300)` |
 | `auto.click()` | 左键单击（三种用法） | `auto.click("保存")` / `auto.click(100,200)` / `auto.click()` |
 | `auto.dclick()` | 双击（用法同上） | `auto.dclick("文件")` |
 | `auto.rclick()` | 右键单击（用法同上） | `auto.rclick("菜单")` |
+| `auto.click_multi("图片"/x,y, k=5, wait=0.2)` | **多次左键点击**（必须显式指定次数和间隔） | `auto.click_multi("确认", k=5, wait=0.2)` |
+| `auto.click_seq(targets, wait=0.2)` | **依次点击多个目标**（列表可为图片名或坐标） | `auto.click_seq(["登录","确定"])` |
 | `auto.drag(x1,y1,x2,y2)` | 平滑拖拽 | `auto.drag(100,100,500,400)` |
+| `auto.scroll(direction, clicks=3, x=None, y=None)` | **鼠标滚轮滚动** | `auto.scroll('down', clicks=5)` |
 | `auto.pos()` | 实时显示鼠标坐标（Ctrl+C 停止） | `auto.pos()` |
 
 ### 2. 键盘操作
@@ -259,6 +260,12 @@ auto.click("按钮名称")   # 自动找图并点击中心
 | `.click(目标)` | 点击（图片名或坐标） |
 | `.dclick(目标)` | 双击 |
 | `.rclick(目标)` | 右键 |
+| `.click_multi(目标, k=次数, wait=间隔)` | **多次左键点击**（k、wait 必须显式指定） |
+| `.click_seq(列表, wait=0.2)` | **依次点击多个目标** |
+| `.moveto(x, y)` | **移动鼠标到坐标** |
+| `.drag(x1, y1, x2, y2, duration=0.5)` | **拖拽** |
+| `.scroll(direction, clicks=3, x, y)` | **鼠标滚轮** |
+| `.snap(note="")` | **截取屏幕并保存** |
 | `.write(文本)` | 粘贴文本 |
 | `.press(键名, times=1)` | 按键 |
 | `.hotkey(k1,k2,...)` | 组合键 |
@@ -295,11 +302,17 @@ auto.click("按钮名称")   # 自动找图并点击中心
 **示例**
 
 ```python
+# 多次点击
 (auto.do()
-    .click("新建按钮")
-    .pause(0.5)
-    .write("文档内容")
-    .click("保存按钮")
+    .moveto(500, 300)
+    .click_multi("确认按钮", k=3, wait=0.2)
+    .scroll('down', clicks=5)
+    .snap("操作完成")
+    .run())
+
+# 连续点击序列
+(auto.do()
+    .click_seq(["登录", "确定", "欢迎"], wait=0.3)
     .run())
 ```
 
@@ -323,8 +336,9 @@ auto.click("按钮名称")   # 自动找图并点击中心
 
 | 方法 | 说明 |
 |------|------|
-| `auto.shot("文件名")` | 全屏截图，保存至 `screenshots/` |
+| `auto.shot("文件名")` | 全屏截图，保存至 `screenshots_author/` |
 | `auto.snip(x, y, w, h, "文件名")` | 区域截图 |
+| `auto.snap(note="")` | **轻量全屏截图**，保存到 `screenshots_author/`，无需文件名 |
 | `auto.capture("按钮名称")` | 交互式生成模板截图（推荐新手使用） |
 
 ### 8. 定时任务
@@ -376,12 +390,14 @@ auto.wait("页面就绪")
 auto.click("确定")
 ```
 
-### 案例4：链式流程
+### 案例4：链式流程（含多次点击、滚动、截图）
 ```python
 (auto.do()
     .click("新建按钮")
     .write("内容")
-    .click("保存")
+    .click_multi("保存按钮", k=2, wait=0.2)
+    .scroll('down', 3)
+    .snap("保存完成")
     .run())
 ```
 
@@ -409,12 +425,11 @@ data = ["张三", "李四"]
     .run())
 ```
 
-### 案例7：每日定时截图
+### 案例7：连续点击多个按钮（动态序列）
 ```python
-def daily_job():
-    auto.click("刷新")
-    auto.shot("日报")
-auto.cron("17:30", daily_job)
+# 实际使用时，列表可通过 find_all 生成或手动指定
+targets = ["登录", "确定", (300, 400), "关闭"]
+auto.click_seq(targets, wait=0.3)
 ```
 
 ### 案例8：批量找图处理
@@ -424,6 +439,14 @@ for x, y in points:
     auto.click(x, y)
     auto.write("已处理")
     auto.click("保存")
+```
+
+### 案例9：每日定时截图
+```python
+def daily_job():
+    auto.click("刷新")
+    auto.shot("日报")
+auto.cron("17:30", daily_job)
 ```
 
 ---
@@ -491,3 +514,4 @@ Apache-2.0 license
 项目地址：https://github.com/honggescripts/ImgClickFlow
 
 **一行代码，让办公自动化触手可及。**
+```
