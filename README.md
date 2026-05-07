@@ -2,7 +2,7 @@
 # ImgClickFlow v2.0
 > 桌面图像自动化领域的「单兵作战神兵利器」—— 一个 Python 脚本，就能超越商业 RPA 的丝滑体验。
 
-[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![License: MPL 2.0](https://img.shields.io/badge/License-MPL_2.0-brightgreen.svg)](https://opensource.org/licenses/MPL-2.0)
 [![Python 3.7+](https://img.shields.io/badge/python-3.7%2B-blue)](https://www.python.org/downloads/)
 [![Platform Windows](https://img.shields.io/badge/platform-Windows-blue)](https://www.microsoft.com/windows)
 
