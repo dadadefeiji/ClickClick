@@ -2,19 +2,22 @@
 """
  Copyright (c) 2026 yushihong. Licensed under the Apache-2.0 license.
  作者知乎主页：https://www.zhihu.com/people/mhaksy
-
+ 作者：yushihong 
+ 地址：福建.福州
 【10秒快速上手】
   1. 复制本文件到任意文件夹（支持中文路径）。
   2. 在同目录下创建 "templates" 文件夹，把按钮截图（PNG格式）放进去。
   3. 写一行代码：auto.click("你的按钮名称")
   4. 运行，完成。
 
-【ImgClickFlow v1.2 核心特性】
+【ImgClickFlow v2.0 核心特性】
   ★ DPI自适应：自动适配100%/125%/150%缩放，一次编写，随处运行
   ★ 智能去重：基于NMS算法合并邻近匹配点，避免重复操作
   ★ 零负担等待：内置重试与超时，无需手动轮询
   ★ 批量识别：find_all()返回所有坐标，轻松实现批量循环
   ★ 链式流程：auto.do()流式编排，像写文章一样写自动化
+  ★ 区域搜索：click/dclick/rclick/find 支持 rect 参数限定查找区域
+  ★ 彩色优先：默认使用彩色模板匹配，更准确（链接状态区分），可启用极速模式（灰度）
 """
 
 import sys
@@ -29,7 +32,8 @@ import sched
 import threading
 from ctypes import Structure, c_ulong, windll, byref
 from typing import List, Tuple, Union, Optional, Callable, Dict
-
+import ctypes
+ctypes.windll.shcore.SetProcessDpiAwareness(2)   # 2 = Per Monitor DPI Aware
 # ---------- 自动安装缺失的依赖包 ----------
 _required_packages = {
     'cv2': 'opencv-python',
@@ -101,6 +105,7 @@ class Config:
     default_similarity = 0.9
     dedup_radius = 5
     forced_image_format = ".png"
+    default_fast_mode = False   # 默认关闭极速模式（使用彩色匹配）
 
     # ===== 超时与重试 =====
     default_timeout = 10
@@ -109,12 +114,19 @@ class Config:
 
     # ===== 调试设置 =====
     verbose_log = True
-    auto_screenshot_on_error = True
+    uto_screenshot_on_error = True
 
     # ===== 流程引擎设置 =====
     flow_default_retries = 0
     flow_default_retry_wait = 1
 
+
+    # ===== 调试录像设置 =====
+    debug_max_screenshots = 20   # 最多保留截图张数
+    debug_max_age_days = 7       # 自动清理超过7天的任务文件夹（预留参数）
+    debug_watermark_bottom_offset = 80 # 水印距底边像素（向上偏移，避开任务栏）
+    debug_watermark_right_margin = 10  # 水印距右边像素
+    debug_max_failed_tasks = 3         # 最多保留几个失败任务文件夹（预留）
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
 # ║                     自动初始化                                              ║
@@ -147,6 +159,7 @@ logger.addHandler(_file_handler)
 logger.info("=" * 40)
 logger.info("ImgClickFlow 办公助手 启动")
 logger.info(f"模板目录={Config.template_dir}, 相似度={Config.default_similarity}, 超时={Config.default_timeout}s")
+logger.info(f"默认匹配模式: {'极速(灰度)' if Config.default_fast_mode else '彩色(精准)'}")
 
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
@@ -401,18 +414,19 @@ def saystring(string, k=1):
 
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
-# ║               图像识别引擎（升级：DPI双重坐标体系）                            ║
+# ║               图像识别引擎（升级：DPI双重坐标体系，彩色优先）                 ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
 class _ImageEngine:
     """
-    图像识别引擎 - DPI缩放修复版
+    图像识别引擎 - DPI缩放修复版 + 彩色匹配优先（精准）
 
     核心改进：
     - 图像匹配在物理坐标系中进行（不受缩放影响）
     - 返回物理坐标，点击时自动转换为逻辑坐标
     - 支持模板缓存，加速重复查找
     - 非极大值抑制去重，避免重复点击
+    - 彩色优先：默认使用彩色匹配，更准确识别链接状态；可启用极速模式（灰度）
     """
 
     def __init__(self):
@@ -497,11 +511,38 @@ class _ImageEngine:
                 merged.append(pt)
         return merged
 
+
+    def _match_template(self, tempname, area_real, threshold, color_mode='colorful'):
+        if area_real is None:
+            area_real = self.search_area_real   # 使用全屏区域作为默认值
+        screen = self._grab_screen(area_real)
+        temp_bgr = self._load_template(tempname)
+        self.tempsize = (temp_bgr.shape[1], temp_bgr.shape[0])
+
+        if color_mode == 'colorful':
+            screen_bgr = cv2.cvtColor(screen, cv2.COLOR_RGB2BGR)
+            result = cv2.matchTemplate(screen_bgr, temp_bgr, cv2.TM_CCOEFF_NORMED)
+        else:  # 'gray'
+            screen_gray = cv2.cvtColor(screen, cv2.COLOR_RGB2GRAY)
+            temp_gray = cv2.cvtColor(temp_bgr, cv2.COLOR_BGR2GRAY)
+            result = cv2.matchTemplate(screen_gray, temp_gray, cv2.TM_CCOEFF_NORMED)
+
+        loc = np.where(result >= threshold)
+        points = []
+        for pt in zip(*loc[::-1]):
+            x = int(pt[0] + area_real[0])
+            y = int(pt[1] + area_real[1])
+            points.append((x, y))
+        return self._non_max_suppression(points)
+
+
+
+
+
+
+
     def find_img(self, tempname, area_real=None, threshold=None):
-        """
-        灰度匹配 - 在物理坐标系中进行
-        返回物理坐标列表
-        """
+        """灰度匹配 - 在物理坐标系中进行（极速模式）"""
         if area_real is None:
             area_real = self.search_area_real
         if threshold is None:
@@ -528,7 +569,7 @@ class _ImageEngine:
         return self.zuobiao
 
     def find_img_colorful(self, tempname, area_real=None, threshold=None):
-        """彩色匹配 - 物理坐标系"""
+        """彩色匹配 - 物理坐标系（精准模式）"""
         if area_real is None:
             area_real = self.search_area_real
         if threshold is None:
@@ -552,52 +593,61 @@ class _ImageEngine:
         self.zuobiao = self._non_max_suppression(points)
         return self.zuobiao
 
-    def find_best(self, tempname, timeout=None, area_real=None, threshold=None):
-        """优先灰度匹配，失败则彩色匹配，返回物理坐标"""
+    def find_best(self, tempname, timeout=None, area_real=None, threshold=None, fast_mode=None):
+        """
+        查找最佳匹配点，返回物理坐标。
+        fast_mode: True=灰度模式, False=彩色模式(默认), None=使用Config.default_fast_mode
+        支持 tempname 为 str 或 list（多个备选模板，按顺序尝试，哪个先匹配上就用哪个）
+        """
         timeout = timeout or Config.default_timeout
         threshold = threshold or self.threshold
+        if fast_mode is None:
+            fast_mode = Config.default_fast_mode
+
+        # 支持单个名字或列表（多浏览器兼容）
+        if isinstance(tempname, str):
+            candidates = [tempname]
+        else:
+            candidates = list(tempname)
 
         start_time = time.time()
         while time.time() - start_time < timeout:
-            coords = self.find_img(tempname, area_real, threshold)
-            if coords:
-                return coords[0]
-
-            coords = self.find_img_colorful(tempname, area_real, threshold)
-            if coords:
-                return coords[0]
-
+            for name in candidates:
+                mode = 'gray' if fast_mode else 'colorful'
+                pts = self._match_template(name, area_real, threshold, mode)
+                if pts:
+                    return pts[0]
             time.sleep(Config.retry_interval)
 
-        logger.warning(f"匹配失败: {tempname}，阈值={threshold}，超时={timeout}s")
+        logger.warning(f"匹配失败: {tempname}，阈值={threshold}，超时={timeout}s，模式={'灰度' if fast_mode else '彩色'}")
         return -1, -1
 
-    def find_all(self, tempname, timeout=None, area_real=None, threshold=None):
-        """查找所有匹配目标（物理坐标列表）"""
+
+    def find_all(self, tempname, timeout=None, area_real=None, threshold=None, fast_mode=None):
+        """查找所有匹配目标，返回物理坐标列表。模式由 fast_mode 决定，不自动回退。"""
         timeout = timeout or Config.default_timeout
         threshold = threshold or self.threshold
+        if fast_mode is None:
+            fast_mode = Config.default_fast_mode
+
+        mode = 'gray' if fast_mode else 'colorful'
 
         start_time = time.time()
         while time.time() - start_time < timeout:
-            coords = self.find_img(tempname, area_real, threshold)
-            if coords:
-                return coords
-            coords = self.find_img_colorful(tempname, area_real, threshold)
-            if coords:
-                return coords
+            pts = self._match_template(tempname, area_real, threshold, mode)
+            if pts:
+                return pts
             time.sleep(Config.retry_interval)
 
         return []
 
-    def click_by_img(self, tempname, timeout=None):
-        """
-        找图并点击中心（自动转换物理→逻辑坐标）
-        """
+    def click_by_img(self, tempname, timeout=None, fast_mode=None):
+        """找图并点击中心（自动转换物理→逻辑坐标）"""
         timeout = timeout or Config.default_timeout
         max_attempts = max(int(timeout * 5), 25)
 
         for _ in range(max_attempts):
-            result = self.find_best(tempname, timeout=1)
+            result = self.find_best(tempname, timeout=1, fast_mode=fast_mode)
             if result != (-1, -1):
                 real_x, real_y = result
                 center_real_x = real_x + self.tempsize[0] // 2
@@ -610,16 +660,15 @@ class _ImageEngine:
         logger.warning(f"点击失败: {tempname}，超时={timeout}s")
         return False
 
-    def find_one_logical(self, tempname, timeout=None):
+    def find_one_logical(self, tempname, timeout=None, fast_mode=None):
         """查找并返回逻辑坐标（供 auto.find 使用）"""
-        result = self.find_best(tempname, timeout)
+        result = self.find_best(tempname, timeout, fast_mode=fast_mode)
         if result != (-1, -1):
             return real_to_logical(result[0], result[1], self.scale)
         return -1, -1
-
-
+    
 # ╔══════════════════════════════════════════════════════════════════════════════╗
-# ║                    定位融合层                                              ║
+# ║                    定位融合层（支持 fast_mode 参数）                         ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
 class _LocatorFusion:
@@ -628,7 +677,7 @@ class _LocatorFusion:
     def __init__(self):
         self.image_engine = _ImageEngine()
 
-    def find(self, tempname, timeout=None, area=None, threshold=None):
+    def find(self, tempname, timeout=None, area=None, threshold=None, fast_mode=None):
         """查找目标，返回逻辑坐标 (x, y) 或 (-1, -1)"""
         area_real = None
         if area is not None:
@@ -637,9 +686,12 @@ class _LocatorFusion:
             width_real = int(width * self.image_engine.scale)
             height_real = int(height * self.image_engine.scale)
             area_real = (left_real, top_real, width_real, height_real)
-        return self.image_engine.find_one_logical(tempname, timeout)
+        result = self.image_engine.find_best(tempname, timeout, area_real, threshold, fast_mode)
+        if result != (-1, -1):
+            return real_to_logical(result[0], result[1], self.image_engine.scale)
+        return -1, -1
 
-    def find_all(self, tempname, timeout=None, area=None, threshold=None):
+    def find_all(self, tempname, timeout=None, area=None, threshold=None, fast_mode=None):
         """查找所有目标，返回逻辑坐标列表"""
         area_real = None
         if area is not None:
@@ -649,11 +701,11 @@ class _LocatorFusion:
             height_real = int(height * self.image_engine.scale)
             area_real = (left_real, top_real, width_real, height_real)
 
-        real_coords = self.image_engine.find_all(tempname, timeout, area_real, threshold)
+        real_coords = self.image_engine.find_all(tempname, timeout, area_real, threshold, fast_mode)
         return [real_to_logical(x, y, self.image_engine.scale) for x, y in real_coords]
 
-    def click(self, tempname, timeout=None):
-        return self.image_engine.click_by_img(tempname, timeout)
+    def click(self, tempname, timeout=None, fast_mode=None):
+        return self.image_engine.click_by_img(tempname, timeout, fast_mode)
 
     def get_template_size(self):
         return self.image_engine.tempsize
@@ -858,8 +910,30 @@ class _EnvChecker:
         print("-" * 50)
         print(f"当前可见: {ok_count}/{len(png_files)}")
 
+
 # ╔══════════════════════════════════════════════════════════════════════════════╗
-# ║                    流程引擎（已优化点击接口）                                ║
+# ║              内部辅助函数（消除重复，行为与原来完全等价）                      ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
+
+def _logic_size_from_phys(tw, th, scale):
+    """根据物理模板大小和缩放系数返回逻辑宽高"""
+    return int(tw / scale), int(th / scale)
+
+def _center_from_rect(lx, ly, logic_w, logic_h):
+    """根据左上角逻辑坐标和逻辑宽高返回中心坐标"""
+    return int(lx + logic_w / 2), int(ly + logic_h / 2)
+
+def _build_rect_focus_shape(lx, ly, logic_w, logic_h):
+    """构造矩形标记字典，用于录像截图"""
+    return {'type': 'rectangle', 'left': lx, 'top': ly, 'width': logic_w, 'height': logic_h}
+
+def _build_circle_focus_shape(x, y):
+    """构造圆形标记字典"""
+    return {'type': 'circle', 'center': (x, y)}
+
+
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║                    流程引擎（支持 rect 和 fast_mode）                         ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
 class Flow:
@@ -879,14 +953,16 @@ class Flow:
         self._data_context = {}
         self._loop_data = None
 
-    # ---------- 单次点击 (单击/双击/右键) ----------
-    def click(self, *args):
+    # ---------- 单次点击 (支持 rect 和 fast_mode) ----------
+    def click(self, *args, rect=None, fast_mode=None):
         """
         单次左键点击
         用法：
-            .click()            # 点击当前位置
-            .click("按钮")       # 找图单击
-            .click(100, 200)    # 坐标单击
+            .click()                                    # 点击当前位置
+            .click("按钮")                               # 找图单击（全屏，默认模式）
+            .click("按钮", rect=(100,200,300,400))       # 限定区域
+            .click("按钮", fast_mode=True)               # 极速模式（灰度优先）
+            .click(100, 200)                           # 坐标单击
         """
         target = None
         extra = {}
@@ -895,16 +971,22 @@ class Flow:
         elif len(args) >= 2:
             target = args[0]
             extra['y'] = args[1]
+        if rect is not None:
+            extra['rect'] = rect
+        if fast_mode is not None:
+            extra['fast_mode'] = fast_mode
         self.steps.append(('click', target, extra))
         return self
 
-    def dclick(self, *args):
+    def dclick(self, *args, rect=None, fast_mode=None):
         """
-        双击（固定2次）
+        双击
         用法：
-            .dclick()            # 当前位置双击
-            .dclick("按钮")       # 找图双击
-            .dclick(100, 200)    # 坐标双击
+            .dclick()                                   # 当前位置双击
+            .dclick("按钮")                              # 找图双击（全屏）
+            .dclick("按钮", rect=(100,200,300,400))      # 限定区域双击
+            .dclick("按钮", fast_mode=True)              # 极速模式
+            .dclick(100, 200)                          # 坐标双击
         """
         target = None
         extra = {}
@@ -913,16 +995,22 @@ class Flow:
         elif len(args) >= 2:
             target = args[0]
             extra['y'] = args[1]
+        if rect is not None:
+            extra['rect'] = rect
+        if fast_mode is not None:
+            extra['fast_mode'] = fast_mode
         self.steps.append(('dclick', target, extra))
         return self
 
-    def rclick(self, *args):
+    def rclick(self, *args, rect=None, fast_mode=None):
         """
-        单次右键点击
+        右键单击
         用法：
-            .rclick()            # 当前位置右键
-            .rclick("菜单")       # 找图右键
-            .rclick(100, 200)    # 坐标右键
+            .rclick()                                   # 当前位置右键
+            .rclick("按钮")                              # 找图右键（全屏）
+            .rclick("按钮", rect=(100,200,300,400))      # 限定区域右键
+            .rclick("按钮", fast_mode=True)              # 极速模式
+            .rclick(100, 200)                          # 坐标右键
         """
         target = None
         extra = {}
@@ -931,60 +1019,46 @@ class Flow:
         elif len(args) >= 2:
             target = args[0]
             extra['y'] = args[1]
+        if rect is not None:
+            extra['rect'] = rect
+        if fast_mode is not None:
+            extra['fast_mode'] = fast_mode
         self.steps.append(('rclick', target, extra))
         return self
 
     # ---------- 鼠标移动 ----------
     def moveto(self, x, y):
-        """
-        移动鼠标到指定逻辑坐标
-        用法：
-            .moveto(100, 200)
-        """
+        """移动鼠标到指定逻辑坐标"""
         self.steps.append(('moveto', (x, y), {}))
         return self
 
     # ---------- 拖拽 ----------
     def drag(self, x1, y1, x2, y2, duration=0.5):
-        """
-        鼠标拖拽操作
-        用法：
-            .drag(100, 200, 300, 400)               # 从(100,200)拖到(300,400)
-            .drag(100, 200, 300, 400, duration=1.0) # 指定时长
-        """
+        """鼠标拖拽操作"""
         self.steps.append(('drag', (x1, y1, x2, y2), {'duration': duration}))
         return self
 
     # ---------- 滚轮 ----------
     def scroll(self, direction, clicks=3, x=None, y=None):
-        """
-        鼠标滚轮滚动
-        用法：
-            .scroll('down')                 # 向下滚动3格
-            .scroll('up', clicks=5)         # 向上滚动5格
-            .scroll('down', x=500, y=300)   # 在指定位置向下滚动
-        """
+        """鼠标滚轮滚动"""
         self.steps.append(('scroll', None, {'direction': direction, 'clicks': clicks, 'x': x, 'y': y}))
         return self
 
     # ---------- 截图 ----------
     def snap(self, note=""):
-        """
-        将当前屏幕截图保存到 screenshots_author 目录
-        用法：
-            .snap()                # 截图，文件名自动含时间戳
-            .snap("登录成功")       # 截图，文件名含备注
-        """
+        """将当前屏幕截图保存到 screenshots_author 目录"""
         self.steps.append(('snap', note, {}))
         return self
 
-    # ---------- 多次点击 (仅左键) ----------
-    def click_multi(self, *args, k, wait):
+    # ---------- 多次点击 (支持 rect 和 fast_mode) ----------
+    def click_multi(self, *args, k, wait, rect=None, fast_mode=None):
         """
         多次左键点击（k、wait 必须显式指定，图片仅定位一次）
         用法：
-            .click_multi("按钮", k=5, wait=0.2)        # 找图点击5次
-            .click_multi(100, 200, k=10, wait=0.5)    # 坐标点击10次
+            .click_multi("按钮", k=5, wait=0.2)                       # 全屏
+            .click_multi("按钮", k=5, wait=0.2, rect=(100,200,300,400)) # 限定区域
+            .click_multi("按钮", k=5, wait=0.2, fast_mode=True)        # 极速模式
+            .click_multi(100, 200, k=10, wait=0.5)                   # 坐标点击
         """
         target = None
         extra = {'k': k, 'wait': wait}
@@ -993,33 +1067,26 @@ class Flow:
         elif len(args) >= 2:
             target = args[0]
             extra['y'] = args[1]
+        if rect is not None:
+            extra['rect'] = rect
+        if fast_mode is not None:
+            extra['fast_mode'] = fast_mode
         self.steps.append(('click_multi', target, extra))
         return self
 
     # ---------- 连续点击序列 ----------
     def click_seq(self, targets, wait=0.2):
-        """
-        依次点击多个目标（支持图片名与坐标混合）
-        用法：
-            .click_seq(["登录", "确定", "欢迎页面"])                 # 纯图片名
-            .click_seq([(100,200), (300,400)])                     # 纯坐标
-            .click_seq(["登录", (100,200), "确定"], wait=0.5)       # 混合
-        """
+        """依次点击多个目标（支持图片名与坐标混合）"""
         self.steps.append(('click_seq', targets, {'wait': wait}))
         return self
 
     # ---------- 候补点击 ----------
     def click_any(self, targets, timeout=None, wait=0.1):
-        """
-        按顺序尝试点击列表中第一个出现的模板或坐标（轮询扫描，一旦命中立即点击并停止）
-        用法：
-            .click_any(["新版保存", "旧版保存", "经典保存"])
-            .click_any(["登录按钮", (500, 400)], timeout=5, wait=0.2)
-        """
+        """按顺序尝试点击列表中第一个出现的模板或坐标"""
         self.steps.append(('click_any', targets, {'timeout': timeout, 'wait': wait}))
         return self
 
-    # ---------- 其他步骤不变 ----------
+    # ---------- 其他步骤 ----------
     def write(self, text):
         self.steps.append(('write', text, {}))
         return self
@@ -1032,12 +1099,20 @@ class Flow:
         self.steps.append(('hotkey', keys, {}))
         return self
 
-    def wait(self, target, timeout=None):
-        self.steps.append(('wait', target, {'timeout': timeout}))
+    def wait(self, target, timeout=None, fast_mode=None):
+        """等待图片出现"""
+        extra = {}
+        if fast_mode is not None:
+            extra['fast_mode'] = fast_mode
+        self.steps.append(('wait', target, {'timeout': timeout, 'fast_mode': fast_mode}))
         return self
 
-    def wait_not(self, target, timeout=None):
-        self.steps.append(('wait_not', target, {'timeout': timeout}))
+    def wait_not(self, target, timeout=None, fast_mode=None):
+        """等待图片消失"""
+        extra = {}
+        if fast_mode is not None:
+            extra['fast_mode'] = fast_mode
+        self.steps.append(('wait_not', target, {'timeout': timeout, 'fast_mode': fast_mode}))
         return self
 
     def pause(self, seconds):
@@ -1155,27 +1230,19 @@ class Flow:
             return 'auto.do().end_for()'
         else:
             return f'auto.do().{action}({target})'
-    
 
-    def _debug_capture(self, action, target, kwargs, coords=None, size=None):
-        """录像截图，根据坐标和尺寸自动绘制焦点标记（矩形或圆圈）"""
+    def _debug_capture(self, action, target, kwargs, coords=None, size=None, search_rect=None):
+        """录像截图，根据坐标和尺寸自动绘制焦点标记以及搜索区域"""
         if not self._debug_recorder or not self._debug_recorder.enabled:
             return
         code = self._make_action_str(action, target, kwargs)
         shape = None
         if coords is not None:
             if size is not None:
-                shape = {
-                    'type': 'rectangle',
-                    'left': coords[0],
-                    'top': coords[1],
-                    'width': size[0],
-                    'height': size[1]
-                }
+                shape = _build_rect_focus_shape(coords[0], coords[1], size[0], size[1])
             else:
-                shape = {'type': 'circle', 'center': coords}
-        self._debug_recorder.capture(code, focus_shape=shape)
-
+                shape = _build_circle_focus_shape(coords[0], coords[1])
+        self._debug_recorder.capture(code, focus_shape=shape, search_rect=search_rect)
 
     def _execute_steps(self, steps):
         i = 0
@@ -1239,7 +1306,8 @@ class Flow:
     def _check_condition(self, target, kwargs):
         if target is None:
             return False
-        result = self.locator.find(target, timeout=1, **kwargs)
+        fast_mode = kwargs.get('fast_mode', None)
+        result = self.locator.find(target, timeout=1, fast_mode=fast_mode)
         return result != (-1, -1)
 
     def _execute_loop(self, steps, start_idx):
@@ -1298,259 +1366,50 @@ class Flow:
                     return i
                 depth -= 1
         return None
-
-
+    
+     # -------------------------------------------------------------------------
+    # 执行单个操作（已修正坐标转换，支持 rect 和 fast_mode）
+    # -------------------------------------------------------------------------
     def _execute_single(self, action, target, kwargs):
         start_time = time.time()
         result = True
 
         try:
-            # ----- 鼠标移动（不截图） -----
             if action == 'moveto':
-                x, y = target
-                mouse_moveto(int(x), int(y))
-                time.sleep(0.02)
-
-            # ----- 单次左键（点击前截图+标记） -----
+                result = self._exec_moveto(target)
             elif action == 'click':
-                if isinstance(target, str):
-                    coords = self.locator.find(target)
-                    if coords != (-1, -1):
-                        lx, ly = coords
-                        tw, th = self.locator.get_template_size()
-                        scale = self.locator.get_scale_factor()
-                        logic_w = tw / scale
-                        logic_h = th / scale
-                        # 截图+矩形标记
-                        self._debug_capture(action, target, kwargs,
-                                            coords=(lx, ly), size=(logic_w, logic_h))
-                        cx, cy = int(lx + logic_w / 2), int(ly + logic_h / 2)
-                        mouse_left_click(cx, cy)
-                    else:
-                        self._debug_capture(action, target, kwargs)  # 失败截图（无标记）
-                        result = False
-                elif isinstance(target, (int, float)):
-                    x, y = int(target), int(kwargs.get('y', 0))
-                    self._debug_capture(action, target, kwargs, coords=(x, y))
-                    mouse_left_click(x, y)
-                else:
-                    x, y = get_mouse_point()
-                    self._debug_capture(action, target, kwargs, coords=(x, y))
-                    mouse_left_click(x, y)
-
-            # ----- 双击（同 click） -----
+                result = self._exec_click(target, kwargs)
             elif action == 'dclick':
-                if isinstance(target, str):
-                    coords = self.locator.find(target)
-                    if coords != (-1, -1):
-                        lx, ly = coords
-                        tw, th = self.locator.get_template_size()
-                        scale = self.locator.get_scale_factor()
-                        logic_w = tw / scale
-                        logic_h = th / scale
-                        self._debug_capture(action, target, kwargs,
-                                            coords=(lx, ly), size=(logic_w, logic_h))
-                        cx, cy = int(lx + logic_w / 2), int(ly + logic_h / 2)
-                        mouse_left_click(cx, cy, k=2)
-                    else:
-                        self._debug_capture(action, target, kwargs)
-                        result = False
-                elif isinstance(target, (int, float)):
-                    x, y = int(target), int(kwargs.get('y', 0))
-                    self._debug_capture(action, target, kwargs, coords=(x, y))
-                    mouse_left_click(x, y, k=2)
-                else:
-                    x, y = get_mouse_point()
-                    self._debug_capture(action, target, kwargs, coords=(x, y))
-                    mouse_left_click(x, y, k=2)
-
-            # ----- 右键（同 click） -----
+                result = self._exec_dclick(target, kwargs)
             elif action == 'rclick':
-                if isinstance(target, str):
-                    coords = self.locator.find(target)
-                    if coords != (-1, -1):
-                        lx, ly = coords
-                        tw, th = self.locator.get_template_size()
-                        scale = self.locator.get_scale_factor()
-                        logic_w = tw / scale
-                        logic_h = th / scale
-                        self._debug_capture(action, target, kwargs,
-                                            coords=(lx, ly), size=(logic_w, logic_h))
-                        cx, cy = int(lx + logic_w / 2), int(ly + logic_h / 2)
-                        mouse_right_click(cx, cy)
-                    else:
-                        self._debug_capture(action, target, kwargs)
-                        result = False
-                elif isinstance(target, (int, float)):
-                    x, y = int(target), int(kwargs.get('y', 0))
-                    self._debug_capture(action, target, kwargs, coords=(x, y))
-                    mouse_right_click(x, y)
-                else:
-                    x, y = get_mouse_point()
-                    self._debug_capture(action, target, kwargs, coords=(x, y))
-                    mouse_right_click(x, y)
-
-            # ----- 拖拽（不截图） -----
+                result = self._exec_rclick(target, kwargs)
             elif action == 'drag':
-                x1, y1, x2, y2 = target
-                drag_mouse(x1, y1, x2, y2, duration=kwargs.get('duration', 0.5))
-
-            # ----- 滚轮（不截图） -----
+                result = self._exec_drag(target, kwargs)
             elif action == 'scroll':
-                direction = kwargs.get('direction', 'down')
-                clicks = int(kwargs.get('clicks', 3))
-                x = kwargs.get('x', None)
-                y = kwargs.get('y', None)
-                scroll_mouse(clicks, direction, x, y)
-
-            # ----- 截图主动保存（本身是截图操作，无需录像） -----
+                result = self._exec_scroll(kwargs)
             elif action == 'snap':
-                note = str(target) if target else ""
-                timestamp = time.strftime('%Y%m%d_%H%M%S')
-                filename = f"snap_{timestamp}_{note}.png" if note else f"snap_{timestamp}.png"
-                path = os.path.join(_base_dir, Config.screenshot_dir, filename)
-                ImageGrab.grab().save(path)
-                logger.info(f"流程截图已保存: {path}")
-                print(f"流程截图已保存: {path}")
-
-            # ----- 多次左键（截图+标记） -----
+                result = self._exec_snap(target)
             elif action == 'click_multi':
-                k = int(kwargs.get('k', 1))
-                wait_time = float(kwargs.get('wait', 0.0))
-                if isinstance(target, str):
-                    coords = self.locator.find(target)
-                    if coords != (-1, -1):
-                        lx, ly = coords
-                        tw, th = self.locator.get_template_size()
-                        scale = self.locator.get_scale_factor()
-                        logic_w = tw / scale
-                        logic_h = th / scale
-                        self._debug_capture('click_multi', target, kwargs,
-                                            coords=(lx, ly), size=(logic_w, logic_h))
-                        cx = int(lx + logic_w / 2)
-                        cy = int(ly + logic_h / 2)
-                        for i in range(k):
-                            mouse_left_click(cx, cy)
-                            if i < k - 1 and wait_time > 0:
-                                time.sleep(wait_time)
-                        result = True
-                    else:
-                        self._debug_capture('click_multi', target, kwargs)
-                        result = False
-                elif isinstance(target, (int, float)):
-                    x = int(target)
-                    y = int(kwargs.get('y', 0))
-                    self._debug_capture('click_multi', target, kwargs, coords=(x, y))
-                    for i in range(k):
-                        mouse_left_click(x, y)
-                        if i < k - 1 and wait_time > 0:
-                            time.sleep(wait_time)
-                    result = True
-                else:
-                    x, y = get_mouse_point()
-                    self._debug_capture('click_multi', target, kwargs, coords=(x, y))
-                    for i in range(k):
-                        mouse_left_click(x, y)
-                        if i < k - 1 and wait_time > 0:
-                            time.sleep(wait_time)
-                    result = True
-
-            # ----- 连续点击序列（每个点击前截图+标记） -----
+                result = self._exec_click_multi(target, kwargs)
             elif action == 'click_seq':
-                wait_time = float(kwargs.get('wait', 0.2))
-                targets_list = target if isinstance(target, list) else []
-                for idx, t in enumerate(targets_list):
-                    if isinstance(t, str):
-                        coords = self.locator.find(t)
-                        if coords != (-1, -1):
-                            lx, ly = coords
-                            tw, th = self.locator.get_template_size()
-                            scale = self.locator.get_scale_factor()
-                            logic_w = tw / scale
-                            logic_h = th / scale
-                            self._debug_capture('click', t, {},
-                                                coords=(lx, ly), size=(logic_w, logic_h))
-                            cx, cy = int(lx + logic_w / 2), int(ly + logic_h / 2)
-                            mouse_left_click(cx, cy)
-                        else:
-                            self._debug_capture('click', t, {})
-                            result = False
-                            break
-                    elif isinstance(t, (tuple, list)) and len(t) >= 2:
-                        x, y = int(t[0]), int(t[1])
-                        self._debug_capture('click', t, {}, coords=(x, y))
-                        mouse_left_click(x, y)
-                    else:
-                        logger.warning(f"click_seq 目标格式不支持: {t}")
-                        result = False
-                        break
-                    if idx < len(targets_list) - 1:
-                        time.sleep(wait_time)
-
-            # ----- 候补点击（命中时截图+标记，失败也截图） -----
+                result = self._exec_click_seq(target, kwargs)
             elif action == 'click_any':
-                timeout_val = kwargs.get('timeout') or Config.default_timeout
-                wait_val = float(kwargs.get('wait', 0.1))
-                targets_list = target if isinstance(target, list) else []
-                start = time.time()
-                found = False
-                while time.time() - start < timeout_val:
-                    for t in targets_list:
-                        if isinstance(t, str):
-                            coords = self.locator.find(t, timeout=0.01)
-                            if coords != (-1, -1):
-                                lx, ly = coords
-                                tw, th = self.locator.get_template_size()
-                                scale = self.locator.get_scale_factor()
-                                logic_w = tw / scale
-                                logic_h = th / scale
-                                self._debug_capture('click', t, {},
-                                                    coords=(lx, ly), size=(logic_w, logic_h))
-                                cx, cy = int(lx + logic_w / 2), int(ly + logic_h / 2)
-                                mouse_left_click(cx, cy)
-                                found = True
-                                break
-                        elif isinstance(t, (tuple, list)) and len(t) >= 2:
-                            x, y = int(t[0]), int(t[1])
-                            self._debug_capture('click', t, {}, coords=(x, y))
-                            mouse_left_click(x, y)
-                            found = True
-                            break
-                    if found:
-                        result = True
-                        break
-                    if time.time() - start < timeout_val:
-                        time.sleep(wait_val)
-                if not found:
-                    self._debug_capture(action, target, kwargs)  # 失败截图
-                    result = False
-
-            # ----- 文本输入（输入前截图，无标记） -----
+                result = self._exec_click_any(target, kwargs)
             elif action == 'write':
-                self._debug_capture(action, target, kwargs)  # 界面状态截图
-                saystring(str(target))
-
-            # ----- 以下操作均不截图 -----
+                result = self._exec_write(target)
             elif action == 'press':
-                times = kwargs.get('times', 1)
-                key_press(str(target), k=times)
+                result = self._exec_press(target, kwargs)
             elif action == 'hotkey':
-                key_press_plus(list(target))
+                result = self._exec_hotkey(target)
             elif action == 'wait':
-                timeout = kwargs.get('timeout') or Config.default_timeout
-                result = self.locator.find(target, timeout=timeout) != (-1, -1)
+                result = self._exec_wait(target, kwargs)
             elif action == 'wait_not':
-                timeout = kwargs.get('timeout') or Config.default_timeout
-                start = time.time()
-                while time.time() - start < timeout:
-                    if self.locator.find(target, timeout=1) == (-1, -1):
-                        result = True
-                        break
-                    time.sleep(0.5)
-                else:
-                    result = False
+                result = self._exec_wait_not(target, kwargs)
             elif action == 'pause':
-                time.sleep(float(target))
+                result = self._exec_pause(target)
+            else:
+                logger.error(f"未知操作: {action}")
+                result = False
         except Exception as e:
             logger.error(f"操作异常: {action}({target}) - {e}")
             result = False
@@ -1576,219 +1435,256 @@ class Flow:
 
         return result
 
-    # def _execute_single(self, action, target, kwargs):
-    #     start_time = time.time()
-    #     result = True
+    # --- 具体执行方法（修正坐标转换）---
+    def _exec_moveto(self, target):
+        x, y = target
+        mouse_moveto(int(x), int(y))
+        time.sleep(0.02)
+        return True
 
-    #     try:
-    #         # ----- 鼠标移动 -----
-    #         if action == 'moveto':
-    #             x, y = target
-    #             mouse_moveto(int(x), int(y))
-    #             time.sleep(0.02)
+    def _exec_click(self, target, kwargs):
+        """单击（支持 rect 和 fast_mode）"""
+        if isinstance(target, str):
+            rect = kwargs.get('rect')
+            fast_mode = kwargs.get('fast_mode')
+            found = self._find_image_coords(target, area=rect, fast_mode=fast_mode)
+            if found is not None:
+                lx, ly, logic_w, logic_h = found
+                self._debug_capture('click', target, kwargs,
+                                    coords=(lx, ly), size=(logic_w, logic_h), search_rect=rect)
+                cx, cy = _center_from_rect(lx, ly, logic_w, logic_h)
+                mouse_left_click(cx, cy)
+                return True
+            else:
+                self._debug_capture('click', target, kwargs, search_rect=rect)
+                return False
+        elif isinstance(target, (int, float)):
+            x, y = int(target), int(kwargs.get('y', 0))
+            self._debug_capture('click', target, kwargs, coords=(x, y))
+            mouse_left_click(x, y)
+            return True
+        else:
+            x, y = get_mouse_point()
+            self._debug_capture('click', target, kwargs, coords=(x, y))
+            mouse_left_click(x, y)
+            return True
 
-    #         # ----- 单次左键 -----
-    #         elif action == 'click':
-    #             if isinstance(target, str):
-    #                 result = self.locator.click(target)
-    #             elif isinstance(target, (int, float)):
-    #                 mouse_left_click(int(target), int(kwargs.get('y', 0)))
-    #             else:
-    #                 x, y = get_mouse_point()
-    #                 mouse_left_click(x, y)
+    def _exec_dclick(self, target, kwargs):
+        """双击"""
+        if isinstance(target, str):
+            rect = kwargs.get('rect')
+            fast_mode = kwargs.get('fast_mode')
+            found = self._find_image_coords(target, area=rect, fast_mode=fast_mode)
+            if found is not None:
+                lx, ly, logic_w, logic_h = found
+                self._debug_capture('dclick', target, kwargs,
+                                    coords=(lx, ly), size=(logic_w, logic_h), search_rect=rect)
+                cx, cy = _center_from_rect(lx, ly, logic_w, logic_h)
+                mouse_left_click(cx, cy, k=2)
+                return True
+            else:
+                self._debug_capture('dclick', target, kwargs, search_rect=rect)
+                return False
+        elif isinstance(target, (int, float)):
+            x, y = int(target), int(kwargs.get('y', 0))
+            self._debug_capture('dclick', target, kwargs, coords=(x, y))
+            mouse_left_click(x, y, k=2)
+            return True
+        else:
+            x, y = get_mouse_point()
+            self._debug_capture('dclick', target, kwargs, coords=(x, y))
+            mouse_left_click(x, y, k=2)
+            return True
 
-    #         # ----- 双击 -----
-    #         elif action == 'dclick':
-    #             if isinstance(target, str):
-    #                 coords = self.locator.find(target)
-    #                 if coords != (-1, -1):
-    #                     mouse_left_click(int(coords[0]), int(coords[1]), k=2)
-    #                 else:
-    #                     result = False
-    #             elif isinstance(target, (int, float)):
-    #                 mouse_left_click(int(target), int(kwargs.get('y', 0)), k=2)
-    #             else:
-    #                 x, y = get_mouse_point()
-    #                 mouse_left_click(x, y, k=2)
+    def _exec_rclick(self, target, kwargs):
+        """右键"""
+        if isinstance(target, str):
+            rect = kwargs.get('rect')
+            fast_mode = kwargs.get('fast_mode')
+            found = self._find_image_coords(target, area=rect, fast_mode=fast_mode)
+            if found is not None:
+                lx, ly, logic_w, logic_h = found
+                self._debug_capture('rclick', target, kwargs,
+                                    coords=(lx, ly), size=(logic_w, logic_h), search_rect=rect)
+                cx, cy = _center_from_rect(lx, ly, logic_w, logic_h)
+                mouse_right_click(cx, cy)
+                return True
+            else:
+                self._debug_capture('rclick', target, kwargs, search_rect=rect)
+                return False
+        elif isinstance(target, (int, float)):
+            x, y = int(target), int(kwargs.get('y', 0))
+            self._debug_capture('rclick', target, kwargs, coords=(x, y))
+            mouse_right_click(x, y)
+            return True
+        else:
+            x, y = get_mouse_point()
+            self._debug_capture('rclick', target, kwargs, coords=(x, y))
+            mouse_right_click(x, y)
+            return True
 
-    #         # ----- 单次右键 -----
-    #         elif action == 'rclick':
-    #             if isinstance(target, str):
-    #                 coords = self.locator.find(target)
-    #                 if coords != (-1, -1):
-    #                     mouse_right_click(int(coords[0]), int(coords[1]))
-    #                 else:
-    #                     result = False
-    #             elif isinstance(target, (int, float)):
-    #                 mouse_right_click(int(target), int(kwargs.get('y', 0)))
-    #             else:
-    #                 x, y = get_mouse_point()
-    #                 mouse_right_click(x, y)
+    def _exec_drag(self, target, kwargs):
+        x1, y1, x2, y2 = target
+        drag_mouse(x1, y1, x2, y2, duration=kwargs.get('duration', 0.5))
+        return True
 
-    #         # ----- 拖拽 -----
-    #         elif action == 'drag':
-    #             x1, y1, x2, y2 = target
-    #             drag_mouse(x1, y1, x2, y2, duration=kwargs.get('duration', 0.5))
+    def _exec_scroll(self, kwargs):
+        direction = kwargs.get('direction', 'down')
+        clicks = int(kwargs.get('clicks', 3))
+        x = kwargs.get('x', None)
+        y = kwargs.get('y', None)
+        scroll_mouse(clicks, direction, x, y)
+        return True
 
-    #         # ----- 滚轮 -----
-    #         elif action == 'scroll':
-    #             direction = kwargs.get('direction', 'down')
-    #             clicks = int(kwargs.get('clicks', 3))
-    #             x = kwargs.get('x', None)
-    #             y = kwargs.get('y', None)
-    #             scroll_mouse(clicks, direction, x, y)
+    def _exec_snap(self, target):
+        note = str(target) if target else ""
+        timestamp = time.strftime('%Y%m%d_%H%M%S')
+        filename = f"snap_{timestamp}_{note}.png" if note else f"snap_{timestamp}.png"
+        path = os.path.join(_base_dir, Config.screenshot_dir, filename)
+        ImageGrab.grab().save(path)
+        logger.info(f"流程截图已保存: {path}")
+        print(f"流程截图已保存: {path}")
+        return True
 
-    #         # ----- 截图 -----
-    #         elif action == 'snap':
-    #             note = str(target) if target else ""
-    #             timestamp = time.strftime('%Y%m%d_%H%M%S')
-    #             filename = f"snap_{timestamp}_{note}.png" if note else f"snap_{timestamp}.png"
-    #             path = os.path.join(_base_dir, Config.screenshot_dir, filename)
-    #             ImageGrab.grab().save(path)
-    #             logger.info(f"流程截图已保存: {path}")
-    #             print(f"流程截图已保存: {path}")
+    def _exec_click_multi(self, target, kwargs):
+        k = int(kwargs.get('k', 1))
+        wait_time = float(kwargs.get('wait', 0.0))
+        if isinstance(target, str):
+            rect = kwargs.get('rect')
+            fast_mode = kwargs.get('fast_mode')
+            found = self._find_image_coords(target, area=rect, fast_mode=fast_mode)
+            if found is not None:
+                lx, ly, logic_w, logic_h = found
+                self._debug_capture('click_multi', target, kwargs,
+                                    coords=(lx, ly), size=(logic_w, logic_h), search_rect=rect)
+                cx, cy = _center_from_rect(lx, ly, logic_w, logic_h)
+                for i in range(k):
+                    mouse_left_click(cx, cy)
+                    if i < k - 1 and wait_time > 0:
+                        time.sleep(wait_time)
+                return True
+            else:
+                self._debug_capture('click_multi', target, kwargs, search_rect=rect)
+                return False
+        elif isinstance(target, (int, float)):
+            x = int(target)
+            y = int(kwargs.get('y', 0))
+            self._debug_capture('click_multi', target, kwargs, coords=(x, y))
+            for i in range(k):
+                mouse_left_click(x, y)
+                if i < k - 1 and wait_time > 0:
+                    time.sleep(wait_time)
+            return True
+        else:
+            x, y = get_mouse_point()
+            self._debug_capture('click_multi', target, kwargs, coords=(x, y))
+            for i in range(k):
+                mouse_left_click(x, y)
+                if i < k - 1 and wait_time > 0:
+                    time.sleep(wait_time)
+            return True
 
-    #         # ----- 多次左键 -----
-    #         elif action == 'click_multi':
-    #             k = int(kwargs.get('k', 1))
-    #             wait_time = float(kwargs.get('wait', 0.0))
-    #             if isinstance(target, str):
-    #                 coords = self.locator.find(target)
-    #                 if coords != (-1, -1):
-    #                     lx, ly = coords
-    #                     tw, th = self.locator.get_template_size()
-    #                     scale = self.locator.get_scale_factor()
-    #                     logic_w = tw / scale
-    #                     logic_h = th / scale
-    #                     cx = int(lx + logic_w / 2)
-    #                     cy = int(ly + logic_h / 2)
-    #                     for i in range(k):
-    #                         mouse_left_click(cx, cy)
-    #                         if i < k - 1 and wait_time > 0:
-    #                             time.sleep(wait_time)
-    #                     result = True
-    #                 else:
-    #                     result = False
-    #             elif isinstance(target, (int, float)):
-    #                 x = int(target)
-    #                 y = int(kwargs.get('y', 0))
-    #                 for i in range(k):
-    #                     mouse_left_click(x, y)
-    #                     if i < k - 1 and wait_time > 0:
-    #                         time.sleep(wait_time)
-    #                 result = True
-    #             else:
-    #                 x, y = get_mouse_point()
-    #                 for i in range(k):
-    #                     mouse_left_click(x, y)
-    #                     if i < k - 1 and wait_time > 0:
-    #                         time.sleep(wait_time)
-    #                 result = True
+    def _exec_click_seq(self, target, kwargs):
+        wait_time = float(kwargs.get('wait', 0.2))
+        targets_list = target if isinstance(target, list) else []
+        for idx, t in enumerate(targets_list):
+            if isinstance(t, str):
+                found = self._find_image_coords(t)
+                if found is not None:
+                    lx, ly, logic_w, logic_h = found
+                    self._debug_capture('click', t, {},
+                                        coords=(lx, ly), size=(logic_w, logic_h))
+                    cx, cy = _center_from_rect(lx, ly, logic_w, logic_h)
+                    mouse_left_click(cx, cy)
+                else:
+                    self._debug_capture('click', t, {})
+                    return False
+            elif isinstance(t, (tuple, list)) and len(t) >= 2:
+                x, y = int(t[0]), int(t[1])
+                self._debug_capture('click', t, {}, coords=(x, y))
+                mouse_left_click(x, y)
+            else:
+                logger.warning(f"click_seq 目标格式不支持: {t}")
+                return False
+            if idx < len(targets_list) - 1:
+                time.sleep(wait_time)
+        return True
 
-    #         # ----- 连续点击序列 -----
-    #         elif action == 'click_seq':
-    #             wait_time = float(kwargs.get('wait', 0.2))
-    #             targets_list = target if isinstance(target, list) else []
-    #             for idx, t in enumerate(targets_list):
-    #                 if isinstance(t, str):
-    #                     ok = self.locator.click(t)
-    #                     if not ok:
-    #                         result = False
-    #                         break
-    #                 elif isinstance(t, (tuple, list)) and len(t) >= 2:
-    #                     mouse_left_click(int(t[0]), int(t[1]))
-    #                 else:
-    #                     logger.warning(f"click_seq 中的目标格式不支持: {t}")
-    #                     result = False
-    #                     break
-    #                 if idx < len(targets_list) - 1:
-    #                     time.sleep(wait_time)
+    def _exec_click_any(self, target, kwargs):
+        timeout_val = kwargs.get('timeout') or Config.default_timeout
+        wait_val = float(kwargs.get('wait', 0.1))
+        targets_list = target if isinstance(target, list) else []
+        start = time.time()
+        found = False
+        while time.time() - start < timeout_val:
+            for t in targets_list:
+                if isinstance(t, str):
+                    found_coords = self._find_image_coords(t, timeout=0.01)
+                    if found_coords is not None:
+                        lx, ly, logic_w, logic_h = found_coords
+                        self._debug_capture('click', t, {},
+                                            coords=(lx, ly), size=(logic_w, logic_h))
+                        cx, cy = _center_from_rect(lx, ly, logic_w, logic_h)
+                        mouse_left_click(cx, cy)
+                        found = True
+                        break
+                elif isinstance(t, (tuple, list)) and len(t) >= 2:
+                    x, y = int(t[0]), int(t[1])
+                    self._debug_capture('click', t, {}, coords=(x, y))
+                    mouse_left_click(x, y)
+                    found = True
+                    break
+            if found:
+                return True
+            if time.time() - start < timeout_val:
+                time.sleep(wait_val)
+        # 没找到
+        self._debug_capture('click_any', target, kwargs)
+        return False
 
-    #         # ----- 候补点击 -----
-    #         elif action == 'click_any':
-    #             timeout_val = kwargs.get('timeout') or Config.default_timeout
-    #             wait_val = float(kwargs.get('wait', 0.1))
-    #             targets_list = target if isinstance(target, list) else []
-    #             start = time.time()
-    #             found = False
-    #             while time.time() - start < timeout_val:
-    #                 for t in targets_list:
-    #                     if isinstance(t, str):
-    #                         # 极短时间查找，不阻塞
-    #                         coords = self.locator.find(t, timeout=0.01)
-    #                         if coords != (-1, -1):
-    #                             # 定位成功，点击中心
-    #                             lx, ly = coords
-    #                             tw, th = self.locator.get_template_size()
-    #                             scale = self.locator.get_scale_factor()
-    #                             logic_w = tw / scale
-    #                             logic_h = th / scale
-    #                             cx = int(lx + logic_w / 2)
-    #                             cy = int(ly + logic_h / 2)
-    #                             mouse_left_click(cx, cy)
-    #                             found = True
-    #                             break
-    #                     elif isinstance(t, (tuple, list)) and len(t) >= 2:
-    #                         mouse_left_click(int(t[0]), int(t[1]))
-    #                         found = True
-    #                         break
-    #                 if found:
-    #                     result = True
-    #                     break
-    #                 # 本轮未命中，等待后继续轮询
-    #                 if time.time() - start < timeout_val:
-    #                     time.sleep(wait_val)
-    #             if not found:
-    #                 result = False
+    def _exec_write(self, target):
+        saystring(str(target))
+        return True
 
-    #         # ----- 其他操作 -----
-    #         elif action == 'write':
-    #             saystring(str(target))
-    #         elif action == 'press':
-    #             times = kwargs.get('times', 1)
-    #             key_press(str(target), k=times)
-    #         elif action == 'hotkey':
-    #             key_press_plus(list(target))
-    #         elif action == 'wait':
-    #             timeout = kwargs.get('timeout') or Config.default_timeout
-    #             result = self.locator.find(target, timeout=timeout) != (-1, -1)
-    #         elif action == 'wait_not':
-    #             timeout = kwargs.get('timeout') or Config.default_timeout
-    #             start = time.time()
-    #             while time.time() - start < timeout:
-    #                 if self.locator.find(target, timeout=1) == (-1, -1):
-    #                     result = True
-    #                     break
-    #                 time.sleep(0.5)
-    #             else:
-    #                 result = False
-    #         elif action == 'pause':
-    #             time.sleep(float(target))
-    #     except Exception as e:
-    #         logger.error(f"操作异常: {action}({target}) - {e}")
-    #         result = False
+    def _exec_press(self, target, kwargs):
+        times = kwargs.get('times', 1)
+        key_press(str(target), k=times)
+        return True
 
-    #     duration = time.time() - start_time
-    #     self.recorder.record(action, target, result, duration)
+    def _exec_hotkey(self, target):
+        key_press_plus(list(target))
+        return True
 
-    #     if not result and action not in ('wait', 'wait_not', 'pause'):
-    #         if action in ('click', 'dclick', 'rclick', 'click_multi', 'click_seq', 'click_any'):
-    #             if isinstance(target, str):
-    #                 self.error_handler.save_error_screenshot(target)
-    #                 print(self.error_handler.format_error_message(target, Config.default_similarity, Config.default_timeout))
-    #             elif action == 'click_any':
-    #                 # 输出所有未找到的模板名
-    #                 names = [str(t) for t in target if isinstance(t, str)]
-    #                 if names:
-    #                     print(f"✗ 查找 {names} 图片失败，流程终止")
-    #                 else:
-    #                     print("✗ click_any 未找到任何目标，流程终止")
-    #             else:
-    #                 print(f"操作 {action} 失败")
-    #         else:
-    #             print(f"操作 {action} 失败")
+    def _exec_wait(self, target, kwargs):
+        timeout = kwargs.get('timeout') or Config.default_timeout
+        fast_mode = kwargs.get('fast_mode')
+        return self.locator.find(target, timeout=timeout, fast_mode=fast_mode) != (-1, -1)
 
-    #     return result
+    def _exec_wait_not(self, target, kwargs):
+        timeout = kwargs.get('timeout') or Config.default_timeout
+        fast_mode = kwargs.get('fast_mode')
+        start = time.time()
+        while time.time() - start < timeout:
+            if self.locator.find(target, timeout=1, fast_mode=fast_mode) == (-1, -1):
+                return True
+            time.sleep(0.5)
+        return False
+
+    def _exec_pause(self, target):
+        time.sleep(float(target))
+        return True
+
+    # --- 图像查找辅助（Flow 内部使用，返回逻辑坐标和逻辑尺寸）---
+    def _find_image_coords(self, tempname, timeout=None, area=None, fast_mode=None):
+        """找图返回 (lx, ly, logic_w, logic_h) 或 None"""
+        coords = self.locator.find(tempname, timeout=timeout, area=area, fast_mode=fast_mode)
+        if coords != (-1, -1):
+            lx, ly = coords
+            tw, th = self.locator.get_template_size()
+            scale = self.locator.get_scale_factor()
+            logic_w, logic_h = _logic_size_from_phys(tw, th, scale)
+            return lx, ly, logic_w, logic_h
+        return None
 
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
@@ -1980,8 +1876,8 @@ class DebugRecorder:
 
     def __init__(self):
         self.enabled = True
-        self.max_screenshots = 15
-        self.max_age_days = 7
+        self.max_screenshots = Config.debug_max_screenshots
+        self.max_age_days = Config.debug_max_age_days
         self._lock = threading.Lock()
         self._task_name = None
         self._task_dir = None
@@ -1990,7 +1886,10 @@ class DebugRecorder:
         self.font_en = None
         self.font_cn = None
         self._font_valid = False
-        self._max_failed_tasks = 5
+
+        self._max_failed_tasks = Config.debug_max_failed_tasks
+        self.bottom_offset = Config.debug_watermark_bottom_offset   # 新增
+        self.right_margin = Config.debug_watermark_right_margin     # 新增
         self._init_font()
 
     def _auto_start(self):
@@ -2050,46 +1949,6 @@ class DebugRecorder:
             return self.font_cn
         return self.font_en if self.font_en else ImageFont.load_default()
 
-    def capture(self, action_code, focus_shape=None):
-        if not self.enabled:
-            return
-        if self._task_dir is None:
-            self._auto_start()
-
-        with self._lock:
-            try:
-                screenshot = ImageGrab.grab()
-                if screenshot is None:
-                    return
-
-                if focus_shape is not None:
-                    self._draw_focus_shape(screenshot, focus_shape)
-
-                now = datetime.datetime.now()
-                now_str = now.strftime("%Y-%m-%d %H:%M:%S")
-                display_code = action_code if len(action_code) <= 50 else action_code[:47] + "..."
-                if self._is_failure:
-                    line2 = f"[{self._task_name}][失败] {display_code}"
-                else:
-                    line2 = f"[{self._task_name}] {display_code}"
-                watermarked = self._add_watermark(screenshot, now_str, line2)
-
-                base_name = f"capture_{now.strftime('%Y%m%d%H%M%S%f')[:-3]}"
-                filepath = os.path.join(self._task_dir, f"{base_name}.png")
-                suffix = 1
-                while os.path.exists(filepath):
-                    filepath = os.path.join(self._task_dir, f"{base_name}_{suffix}.png")
-                    suffix += 1
-
-                watermarked.save(filepath)
-                self._counter += 1
-
-                if not self._is_failure:
-                    self._enforce_limit()
-
-            except Exception as e:
-                logger.debug(f"调试截图失败: {e}")
-
     def _draw_focus_shape(self, image, shape):
         """根据形状字典在图片上绘制焦点标记：圆圈或矩形"""
         if shape is None:
@@ -2115,31 +1974,143 @@ class DebugRecorder:
         except:
             pass
 
-    def _add_watermark(self, image, line1, line2):
-        draw = ImageDraw.Draw(image)
-        font1 = self._get_font(line1)
-        font2 = self._get_font(line2)
-        margin = 10
+    def _draw_search_rect(self, image, rect):
+        """
+        在截图上用蓝白双线绘制查找区域（rect: left, top, width, height 逻辑坐标）
+        """
+        if rect is None:
+            return
         try:
-            bbox1 = draw.textbbox((0, 0), line1, font=font1)
-            w1, h1 = bbox1[2] - bbox1[0], bbox1[3] - bbox1[1]
-            bbox2 = draw.textbbox((0, 0), line2, font=font2)
-            w2, h2 = bbox2[2] - bbox2[0], bbox2[3] - bbox2[1]
-        except AttributeError:
-            w1, h1 = draw.textsize(line1, font=font1)
-            w2, h2 = draw.textsize(line2, font=font2)
-        total_height = h1 + h2 + 5
-        max_width = max(w1, w2)
+            scale = get_scale_factor()
+            left_log, top_log, w_log, h_log = rect
+            left_real, top_real = logical_to_real(left_log, top_log, scale)
+            right_real = left_real + int(w_log * scale)
+            bottom_real = top_real + int(h_log * scale)
+
+            draw = ImageDraw.Draw(image)
+            # 外线：蓝色，较粗
+            draw.rectangle(
+                [left_real - 1, top_real - 1, right_real + 1, bottom_real + 1],
+                outline='blue',
+                width=2
+            )
+            # 内线：白色，较细
+            draw.rectangle(
+                [left_real + 1, top_real + 1, right_real - 1, bottom_real - 1],
+                outline='white',
+                width=1
+            )
+        except Exception as e:
+            logger.debug(f"绘制搜索区域失败: {e}")
+
+
+    def capture(self, action_code, focus_shape=None, focus_shapes=None, search_rect=None):
+        if not self.enabled:
+            return
+        if self._task_dir is None:
+            self._auto_start()
+
+        with self._lock:
+            try:
+                screenshot = ImageGrab.grab()
+                if screenshot is None:
+                    return
+
+                if search_rect is not None:
+                    self._draw_search_rect(screenshot, search_rect)
+
+                # 合并所有需要绘制的焦点形状
+                all_shapes = []
+                if focus_shape is not None:
+                    all_shapes.append(focus_shape)
+                if focus_shapes is not None:
+                    all_shapes.extend(focus_shapes)
+
+                for shape in all_shapes:
+                    self._draw_focus_shape(screenshot, shape)
+
+                now = datetime.datetime.now()
+                now_str = now.strftime("%Y-%m-%d %H:%M:%S")
+                display_code = action_code if len(action_code) <= 50 else action_code[:47] + "..."
+                if self._is_failure:
+                    line2 = f"[{self._task_name}][失败] {display_code}"
+                else:
+                    line2 = f"[{self._task_name}] {display_code}"
+
+                # 定位用户脚本调用行号
+                try:
+                    this_file = os.path.basename(__file__)
+                    frame = sys._getframe()
+                    while frame and os.path.basename(frame.f_code.co_filename) == this_file:
+                        frame = frame.f_back
+                    if frame:
+                        caller_file = os.path.basename(frame.f_code.co_filename)
+                        caller_lineno = frame.f_lineno
+                        line3 = f"{caller_file}:第{caller_lineno}行代码"
+                    else:
+                        line3 = None
+                except:
+                    line3 = None
+
+                watermarked = self._add_watermark(screenshot, now_str, line2, line3=line3)
+
+                base_name = f"capture_{now.strftime('%Y%m%d%H%M%S%f')[:-3]}"
+                filepath = os.path.join(self._task_dir, f"{base_name}.png")
+                suffix = 1
+                while os.path.exists(filepath):
+                    filepath = os.path.join(self._task_dir, f"{base_name}_{suffix}.png")
+                    suffix += 1
+
+                watermarked.save(filepath)
+                self._counter += 1
+
+                if not self._is_failure:
+                    self._enforce_limit()
+
+            except Exception as e:
+                logger.debug(f"调试截图失败: {e}")
+
+
+    def _add_watermark(self, image, line1, line2, line3=None):
+        draw = ImageDraw.Draw(image)
+        margin = 10
+        # 转换所有可用文本为字体对象
+        texts = [(line1, self._get_font(line1)), (line2, self._get_font(line2))]
+        if line3:
+            texts.append((line3, self._get_font(line3)))
+
+        # 计算每行的宽高
+        sizes = []
+        total_height = 0
+        max_width = 0
+        for text, font in texts:
+            try:
+                bbox = draw.textbbox((0, 0), text, font=font)
+                w = bbox[2] - bbox[0]
+                h = bbox[3] - bbox[1]
+            except AttributeError:
+                w, h = draw.textsize(text, font=font)
+            sizes.append((w, h))
+            total_height += h
+            if w > max_width:
+                max_width = w
+
+        total_height += (len(texts) - 1) * 5  # 行间距 5 像素
+
         img_w, img_h = image.size
-        x = img_w - max_width - margin
-        y = img_h - total_height - margin
-        offsets = [(-1,-1), (-1,1), (1,-1), (1,1)]
-        for dx, dy in offsets:
-            draw.text((x+dx, y+dy), line1, font=font1, fill="black")
-            draw.text((x+dx, y+dy+h1+5), line2, font=font2, fill="black")
-        draw.text((x, y), line1, font=font1, fill="white")
-        draw.text((x, y+h1+5), line2, font=font2, fill="white")
+        x = img_w - max_width - self.right_margin
+        y = img_h - total_height - self.bottom_offset
+
+        # 逐行绘制（阴影 + 白字）
+        current_y = y
+        for (text, font), (_, h) in zip(texts, sizes):
+            for dx, dy in [(-1, -1), (-1, 1), (1, -1), (1, 1)]:
+                draw.text((x + dx, current_y + dy), text, font=font, fill="black")
+            draw.text((x, current_y), text, font=font, fill="white")
+            current_y += h + 5
+
         return image
+
 
     def _enforce_limit(self):
         if not self._task_dir:
@@ -2195,7 +2166,7 @@ class DebugRecorder:
 
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
-# ║                    主用户接口类 _Auto (集成录像调用)                         ║
+# ║                    主用户接口类 _Auto (集成录像调用，支持 fast_mode)         ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
 class _Auto:
@@ -2236,12 +2207,7 @@ class _Auto:
         return path
 
     def snap(self, note=""):
-        """
-        截取当前屏幕并保存到 screenshots_author 目录
-        用法：
-            auto.snap()                # 自动命名
-            auto.snap("登录成功")       # 带备注
-        """
+        """截取当前屏幕并保存到 screenshots_author 目录"""
         if self.recorder.enabled:
             self.recorder.capture(f'auto.snap("{note}")')
         timestamp = time.strftime('%Y%m%d_%H%M%S')
@@ -2260,91 +2226,81 @@ class _Auto:
     def moveto(self, x, y):
         """移动鼠标到指定坐标"""
         if self.recorder.enabled:
-            self.recorder.capture(f'auto.moveto({x}, {y})', focus_shape={'type':'circle', 'center':(x, y)})
+            self.recorder.capture(f'auto.moveto({x}, {y})', focus_shape=_build_circle_focus_shape(x, y))
         mouse_moveto(int(x), int(y))
 
     move = moveto
 
-    def click(self, *args):
+    def click(self, *args, rect=None, fast_mode=None):
+        """左键单击。支持 rect 区域和 fast_mode 极速模式"""
         if not args:
             if self.recorder.enabled:
                 x, y = get_mouse_point()
-                self.recorder.capture("auto.click()", focus_shape={'type':'circle', 'center':(x, y)})
+                self.recorder.capture("auto.click()", focus_shape=_build_circle_focus_shape(x, y))
             x, y = get_mouse_point()
             mouse_left_click(x, y)
         elif len(args) == 1 and isinstance(args[0], str):
-            self._click_by_image(args[0])
+            self._click_by_image(args[0], rect=rect, fast_mode=fast_mode)
         elif len(args) >= 2:
             if self.recorder.enabled:
-                self.recorder.capture(f"auto.click({args[0]}, {args[1]})", focus_shape={'type':'circle', 'center':(args[0], args[1])})
+                self.recorder.capture(f"auto.click({args[0]}, {args[1]})",
+                                      focus_shape=_build_circle_focus_shape(args[0], args[1]))
             mouse_left_click(int(args[0]), int(args[1]))
 
-    def dclick(self, *args):
+    def dclick(self, *args, rect=None, fast_mode=None):
+        """双击。支持 rect 区域和 fast_mode"""
         if not args:
             if self.recorder.enabled:
                 x, y = get_mouse_point()
-                self.recorder.capture("auto.dclick()", focus_shape={'type':'circle', 'center':(x, y)})
+                self.recorder.capture("auto.dclick()", focus_shape=_build_circle_focus_shape(x, y))
             x, y = get_mouse_point()
             mouse_left_click(x, y, k=2)
         elif len(args) == 1 and isinstance(args[0], str):
-            self._click_by_image(args[0], clicks=2)
+            self._click_by_image(args[0], clicks=2, rect=rect, fast_mode=fast_mode)
         elif len(args) >= 2:
             if self.recorder.enabled:
-                self.recorder.capture(f"auto.dclick({args[0]}, {args[1]})", focus_shape={'type':'circle', 'center':(args[0], args[1])})
+                self.recorder.capture(f"auto.dclick({args[0]}, {args[1]})",
+                                      focus_shape=_build_circle_focus_shape(args[0], args[1]))
             mouse_left_click(int(args[0]), int(args[1]), k=2)
 
-    def rclick(self, *args):
+    def rclick(self, *args, rect=None, fast_mode=None):
+        """右键单击。支持 rect 区域和 fast_mode"""
         if not args:
             if self.recorder.enabled:
                 x, y = get_mouse_point()
-                self.recorder.capture("auto.rclick()", focus_shape={'type':'circle', 'center':(x, y)})
+                self.recorder.capture("auto.rclick()", focus_shape=_build_circle_focus_shape(x, y))
             x, y = get_mouse_point()
             mouse_right_click(x, y)
         elif len(args) == 1 and isinstance(args[0], str):
-            self._click_by_image(args[0], right_click=True)
+            self._click_by_image(args[0], right_click=True, rect=rect, fast_mode=fast_mode)
         elif len(args) >= 2:
             if self.recorder.enabled:
-                self.recorder.capture(f"auto.rclick({args[0]}, {args[1]})", focus_shape={'type':'circle', 'center':(args[0], args[1])})
+                self.recorder.capture(f"auto.rclick({args[0]}, {args[1]})",
+                                      focus_shape=_build_circle_focus_shape(args[0], args[1]))
             mouse_right_click(int(args[0]), int(args[1]))
 
     def drag(self, x1, y1, x2, y2, duration=0.5):
         if self.recorder.enabled:
-            self.recorder.capture(f'auto.drag({x1},{y1},{x2},{y2})', focus_shape={'type':'circle', 'center':(x1, y1)})
+            self.recorder.capture(f'auto.drag({x1},{y1},{x2},{y2})',
+                                  focus_shape=_build_circle_focus_shape(x1, y1))
         drag_mouse(int(x1), int(y1), int(x2), int(y2), duration=duration)
 
     def scroll(self, direction, clicks=3, x=None, y=None):
-        """
-        鼠标滚轮滚动
-        用法：
-            auto.scroll('down')                 # 向下滚动3格
-            auto.scroll('up', clicks=5)         # 向上滚动5格
-            auto.scroll('down', x=500, y=300)   # 在指定位置向下滚动
-        """
         if self.recorder.enabled:
             self.recorder.capture(f"auto.scroll('{direction}', clicks={clicks})")
         scroll_mouse(clicks, direction, x, y)
 
-    def click_multi(self, *args, k, wait):
-        """
-        多次左键点击（必须显式指定k和wait，图片仅定位一次）
-        用法：
-            auto.click_multi("按钮", k=5, wait=0.2)        # 找图点击5次
-            auto.click_multi(100, 200, k=10, wait=0.5)    # 坐标点击10次
-        """
+    def click_multi(self, *args, k, wait, rect=None, fast_mode=None):
+        """多次左键点击（必须显式指定k和wait，支持 rect 和 fast_mode）"""
         action_code = f'auto.click_multi("{args[0] if len(args)==1 else (args[0], args[1])}", k={k}, wait={wait})'
         if self.recorder.enabled:
             self.recorder.capture(action_code)
 
         if len(args) == 1 and isinstance(args[0], str):
-            coords = self._locator.find(args[0])
-            if coords != (-1, -1):
-                lx, ly = coords
-                tw, th = self._locator.get_template_size()
-                scale = self._locator.get_scale_factor()
-                logic_w = tw / scale
-                logic_h = th / scale
-                cx = int(lx + logic_w / 2)
-                cy = int(ly + logic_h / 2)
+            found = self._find_image_coords(args[0], area=rect, fast_mode=fast_mode)
+            if found is not None:
+                lx, ly, logic_w, logic_h = found
+                cx, cy = _center_from_rect(lx, ly, logic_w, logic_h)
                 for i in range(k):
                     mouse_left_click(cx, cy)
                     if i < k - 1 and wait > 0:
@@ -2365,16 +2321,8 @@ class _Auto:
                     time.sleep(wait)
         time.sleep(Config.post_click_delay)
 
-
     def click_seq(self, targets, wait=0.2):
-        """
-        依次点击多个目标（支持图片名与坐标混合）
-        每个目标点击时都会触发调试截图，图片目标画红色方框，坐标目标画红色圆圈
-        用法：
-            auto.click_seq(["登录", "确定", "欢迎页面"])
-            auto.click_seq([(100,200), (300,400)])
-            auto.click_seq(["登录", (100,200)], wait=0.5)
-        """
+        """依次点击多个目标（支持图片名与坐标混合）"""
         for idx, t in enumerate(targets):
             if isinstance(t, str):
                 if not self._click_by_image(t):
@@ -2382,11 +2330,10 @@ class _Auto:
                     return
             elif isinstance(t, (tuple, list)) and len(t) >= 2:
                 x, y = int(t[0]), int(t[1])
-                # 为坐标点击生成带红色圆圈标记的调试截图
                 if self.recorder.enabled:
                     self.recorder.capture(
                         f"auto.click_seq 坐标({x},{y})",
-                        focus_shape={'type': 'circle', 'center': (x, y)}
+                        focus_shape=_build_circle_focus_shape(x, y)
                     )
                 mouse_left_click(x, y)
             else:
@@ -2394,15 +2341,9 @@ class _Auto:
             if idx < len(targets) - 1:
                 time.sleep(wait)
         time.sleep(Config.post_click_delay)
-    
 
     def click_any(self, targets, timeout=None, wait=0.1):
-        """
-        按顺序尝试点击列表中第一个出现的模板或坐标（轮询扫描，一旦命中立即点击并停止）
-        用法：
-            auto.click_any(["新版保存", "旧版保存", "经典保存"])
-            auto.click_any(["登录按钮", (500, 400)], timeout=5, wait=0.2)
-        """
+        """按顺序尝试点击列表中第一个出现的模板或坐标"""
         if self.recorder.enabled:
             self.recorder.capture(f"auto.click_any({targets!r})")
         timeout_val = timeout or Config.default_timeout
@@ -2412,15 +2353,10 @@ class _Auto:
         while time.time() - start < timeout_val:
             for t in targets:
                 if isinstance(t, str):
-                    coords = self._locator.find(t, timeout=0.01)
-                    if coords != (-1, -1):
-                        lx, ly = coords
-                        tw, th = self._locator.get_template_size()
-                        scale = self._locator.get_scale_factor()
-                        logic_w = tw / scale
-                        logic_h = th / scale
-                        cx = int(lx + logic_w / 2)
-                        cy = int(ly + logic_h / 2)
+                    found_coords = self._find_image_coords(t, timeout=0.01)
+                    if found_coords is not None:
+                        lx, ly, logic_w, logic_h = found_coords
+                        cx, cy = _center_from_rect(lx, ly, logic_w, logic_h)
                         mouse_left_click(cx, cy)
                         found = True
                         break
@@ -2451,23 +2387,19 @@ class _Auto:
         except KeyboardInterrupt:
             print("\n已停止。")
 
-    def _click_by_image(self, tempname, clicks=1, right_click=False):
-        """找图点击，负责录像截图（含矩形标记）"""
+    # ---- 图像点击内部实现（支持 rect 和 fast_mode）----
+    def _click_by_image(self, tempname, clicks=1, right_click=False, rect=None, fast_mode=None):
+        """找图点击，负责录像截图（含矩形标记及搜索范围蓝框）"""
         action_code = f"auto.{'rclick' if right_click else 'dclick' if clicks>1 else 'click'}(\"{tempname}\")"
         start_time = time.time()
 
-        coords = self._locator.find(tempname)
-        scale = self._locator.get_scale_factor()
-        if coords != (-1, -1):
-            lx, ly = coords
-            tw, th = self._locator.get_template_size()
-            tw_logic = int(tw / scale)
-            th_logic = int(th / scale)
-            shape = {'type': 'rectangle', 'left': lx, 'top': ly, 'width': tw_logic, 'height': th_logic}
+        found = self._find_image_coords(tempname, area=rect, fast_mode=fast_mode)
+        if found is not None:
+            lx, ly, logic_w, logic_h = found
+            shape = _build_rect_focus_shape(lx, ly, logic_w, logic_h)
             if self.recorder.enabled:
-                self.recorder.capture(action_code, focus_shape=shape)
-
-            cx, cy = int(lx + tw_logic/2), int(ly + th_logic/2)
+                self.recorder.capture(action_code, focus_shape=shape, search_rect=rect)
+            cx, cy = _center_from_rect(lx, ly, logic_w, logic_h)
             if right_click:
                 mouse_right_click(cx, cy)
             else:
@@ -2477,9 +2409,20 @@ class _Auto:
             return True
         else:
             if self.recorder.enabled:
-                self.recorder.capture(action_code, focus_shape=None)
+                self.recorder.capture(action_code, focus_shape=None, search_rect=rect)
             self._error_handler.save_error_screenshot(tempname)
             return False
+
+    def _find_image_coords(self, tempname, timeout=None, area=None, fast_mode=None):
+        """找图并返回 (lx, ly, logic_w, logic_h) 或 None"""
+        coords = self._locator.find(tempname, timeout=timeout, area=area, fast_mode=fast_mode)
+        if coords != (-1, -1):
+            lx, ly = coords
+            tw, th = self._locator.get_template_size()
+            scale = self._locator.get_scale_factor()
+            logic_w, logic_h = _logic_size_from_phys(tw, th, scale)
+            return lx, ly, logic_w, logic_h
+        return None
 
     # ===== 键盘操作 =====
     def write(self, text, times=1):
@@ -2507,23 +2450,66 @@ class _Auto:
             key_press(str(k))
             time.sleep(0.05)
 
-    # ===== 图像识别 =====
-    def find(self, tempname, timeout=None, similarity=None, rect=None):
+    # ===== 图像识别（支持 rect 和 fast_mode） =====
+    def find(self, tempname, timeout=None, similarity=None, rect=None, fast_mode=None):
+        """查找图片，返回逻辑坐标 (x, y) 或 (-1, -1)。支持 rect 区域和 fast_mode"""
         if self.recorder.enabled:
-            self.recorder.capture(f'auto.find("{tempname}")')
-        return self._locator.find(tempname, timeout=timeout, area=rect)
+            self.recorder.capture(f'auto.find("{tempname}")', search_rect=rect)
+        return self._locator.find(tempname, timeout=timeout, area=rect, fast_mode=fast_mode)
 
-    def find_all(self, tempname, timeout=None, similarity=None, rect=None):
+    def find_all(self, tempname, timeout=None, similarity=None, rect=None, fast_mode=None):
+        """查找所有匹配，返回中心点逻辑坐标列表，可直接用于 click(x,y)。
+        调试截屏中会圈出所有找到的目标（红框）以及搜索范围（蓝框）。"""
+        points = self._locator.find_all(tempname, timeout=timeout, area=rect, fast_mode=fast_mode)
+
         if self.recorder.enabled:
-            self.recorder.capture(f'auto.find_all("{tempname}")')
-        return self._locator.find_all(tempname, timeout=timeout, area=rect)
+            if points:
+                tw, th = self._locator.get_template_size()
+                scale = self._locator.get_scale_factor()
+                logic_w = int(tw / scale)
+                logic_h = int(th / scale)
 
-    def wait(self, tempname, timeout=30):
+                # 为每个匹配点生成红框（基于左上角坐标，points 此时为左上角逻辑坐标）
+                red_rects = []
+                for (lx, ly) in points:
+                    red_rects.append({
+                        'type': 'rectangle',
+                        'left': lx,
+                        'top': ly,
+                        'width': logic_w,
+                        'height': logic_h
+                    })
+
+                self.recorder.capture(
+                    f'auto.find_all("{tempname}")',
+                    search_rect=rect,
+                    focus_shapes=red_rects
+                )
+            else:
+                # 即使没找到，依然生成调试截图（只有搜索范围蓝框）
+                self.recorder.capture(
+                    f'auto.find_all("{tempname}")',
+                    search_rect=rect
+                )
+
+        if not points:
+            return []
+
+        # 转换为便于点击的中心点坐标（基于左上角坐标 points）
+        tw, th = self._locator.get_template_size()
+        scale = self._locator.get_scale_factor()
+        logic_w = int(tw / scale)
+        logic_h = int(th / scale)
+        centers = [(int(lx + logic_w / 2), int(ly + logic_h / 2)) for (lx, ly) in points]
+        return centers
+
+
+    def wait(self, tempname, timeout=30, fast_mode=None):
         if self.recorder.enabled:
             self.recorder.capture(f'auto.wait("{tempname}", timeout={timeout})')
         logger.info(f"等待 '{tempname}' 出现（超时={timeout}s）...")
         print(f"等待 '{tempname}' 出现...")
-        result = self._locator.find(tempname, timeout=timeout)
+        result = self._locator.find(tempname, timeout=timeout, fast_mode=fast_mode)
         if result != (-1, -1):
             print(f"'{tempname}' 已出现")
             return True
@@ -2531,14 +2517,14 @@ class _Auto:
             print(f"✗ 查找{tempname}图片失败，流程终止")
             return False
 
-    def wait_not(self, tempname, timeout=30):
+    def wait_not(self, tempname, timeout=30, fast_mode=None):
         if self.recorder.enabled:
             self.recorder.capture(f'auto.wait_not("{tempname}", timeout={timeout})')
         logger.info(f"等待 '{tempname}' 消失（超时={timeout}s）...")
         print(f"等待 '{tempname}' 消失...")
         start = time.time()
         while time.time() - start < timeout:
-            if self._locator.find(tempname, timeout=1) == (-1, -1):
+            if self._locator.find(tempname, timeout=1, fast_mode=fast_mode) == (-1, -1):
                 print(f"'{tempname}' 已消失")
                 return True
             time.sleep(0.5)
@@ -2596,7 +2582,7 @@ class _Auto:
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
 auto = _Auto()
-auto.version = "1.0.0"
+auto.version = "1.2.0"   # 版本号更新
 
 search = find_files
 monthends = first_last_day
@@ -2604,9 +2590,9 @@ monthends = first_last_day
 if __name__ == "__main__":
     auto.help()
     print("\n" + "=" * 60)
-    print("ImgClickFlow v1.0 正式发布")
+    print("ImgClickFlow v1.2 正式发布")
+    print("新增特性：区域搜索，蓝白线框标记查找范围，彩色优先精准模式，可选极速模式")
     print("作者知乎：https://www.zhihu.com/people/mhaksy")
-    print("核心特性：DPI自动适配 | 智能去重 | 零负担等待 | 批量识别 | 链式流程")
     print("=" * 60)
     print("\n助手已就绪。")
     print('''
@@ -2653,7 +2639,8 @@ if __name__ == "__main__":
 
 【重要提醒】
   ★ 截图必须用 PNG 格式！JPG 会造成像素偏移！
-  ★ v1.0 已修复 DPI 缩放问题，100%/125%/150% 均可正常使用
+  ★ v1.2 已修复 DPI 缩放问题，100%/125%/150% 均可正常使用
+  ★ 默认使用彩色匹配（精准），可通过 fast_mode=True 启用极速模式（灰度）
   ★ 模板只截按钮本体，越小越独特越好
 
 ═══════════════════════════════════════════════════════════════════════
@@ -2668,6 +2655,7 @@ if __name__ == "__main__":
   default_timeout = 10             # 找图默认超时（秒）
   retry_interval = 0.2             # 找图失败重试间隔（秒）
   post_click_delay = 0.3           # 点击后等待界面反应的时间（秒）
+  default_fast_mode = False        # 默认关闭极速模式（使用彩色匹配）
 
 ═══════════════════════════════════════════════════════════════════════
 三、API 速查表
@@ -2677,7 +2665,7 @@ if __name__ == "__main__":
 ────────────────────────────────────────────────────────────────────
 
   auto.moveto(x, y)            移动鼠标到逻辑坐标
-  auto.click()               左键单击（三种用法：无参数/坐标/图片名）
+  auto.click()               左键单击（无参数/坐标/图片名，可选 rect/fast_mode）
   auto.dclick()              双击
   auto.rclick()              右键单击
   auto.drag(x1,y1,x2,y2)     平滑拖拽
@@ -2700,13 +2688,13 @@ if __name__ == "__main__":
 3.3 图像识别
 ────────────────────────────────────────────────────────────────────
 
-  auto.find("按钮名", timeout=None, similarity=None, rect=None)
+  auto.find("按钮名", timeout=None, similarity=None, rect=None, fast_mode=None)
       返回 (x, y) 或 (-1, -1)
-  auto.find_all("按钮名") 
+  auto.find_all("按钮名", rect=None, fast_mode=None) 
       返回所有匹配坐标列表 [(x,y), ...]
-  auto.wait("按钮名", timeout=30)
+  auto.wait("按钮名", timeout=30, fast_mode=None)
       等待图片出现，成功返回True
-  auto.wait_not("按钮名", timeout=30)
+  auto.wait_not("按钮名", timeout=30, fast_mode=None)
       等待图片消失
 
 3.4 流程引擎（链式调用）
@@ -2715,9 +2703,11 @@ if __name__ == "__main__":
   创建流程：auto.do() → 添加步骤 → .run()
 
   可用方法：
-    .click(目标) .dclick(目标) .rclick(目标)
+    .click(目标, rect=None, fast_mode=None) 
+    .dclick(目标, rect=None, fast_mode=None) 
+    .rclick(目标, rect=None, fast_mode=None)
     .write(文本) .press(键名) .hotkey(k1,k2,...)
-    .wait(目标) .wait_not(目标) .pause(秒)
+    .wait(目标, fast_mode=None) .wait_not(目标, fast_mode=None) .pause(秒)
     .retry(次数, 间隔)      # 整体重试
     .if_see(目标) .if_not_see(目标) .else_do() .endif()
     .for_data(列表) .end_for()   # 循环体可用{item}和{index}
@@ -2803,9 +2793,13 @@ def daily_job():
     auto.shot("日报")
 auto.cron("17:30", daily_job)
 
+# 案例6：区域限定点击 + 极速模式
+auto.click("链接", rect=(100,200,300,50), fast_mode=True)
+
 ═══════════════════════════════════════════════════════════════════════
-文档版本：v1.2    适用脚本：ImgClickFlow    最后更新：2026年5月
+文档版本：v2.0    适用脚本：ImgClickFlow    最后更新：2026年5月
 作者知乎：https://www.zhihu.com/people/mhaksy
+作者：FUJIAN·FUZHOU YUSHIHONG
 ═══════════════════════════════════════════════════════════════════════
 
 ''')
