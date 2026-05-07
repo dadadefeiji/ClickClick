@@ -9,10 +9,11 @@
 [![Platform Windows](https://img.shields.io/badge/platform-Windows-blue)](https://www.microsoft.com/windows)
 
 **作者知乎**：[https://www.zhihu.com/people/mhaksy](https://www.zhihu.com/people/mhaksy)
+**作者** FUJIAN·FUZHOU YUSHIHONG
 
 ## 设计哲学：像初代 iPhone 一样极简
 
-我们相信，真正的力量源于极致的简单。ImgClickFlow 不依赖臃肿的编辑器、复杂的模块或繁琐的配置，**一切皆为 `auto`**。作者已将 DPI 适配、超时重试、智能去重等所有复杂逻辑内化，留给你的只有和说话一样自然的自动化代码。
+我相信，真正的力量源于极致的简单。ImgClickFlow 不依赖臃肿的编辑器、复杂的模块或繁琐的配置，**一切皆为 `auto`**。作者已将 DPI 适配、超时重试、智能去重等所有复杂逻辑内化，留给你的只有和说话一样自然的自动化代码。
 
 **一个脚本，即开即用。极致打磨，单兵作战体验远远超越现有商业 RPA。**
 
