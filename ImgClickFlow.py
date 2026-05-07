@@ -1,6 +1,7 @@
 # -*- coding: UTF-8 -*-
 """
- Copyright (c) 2026 yushihong. Licensed under the Apache-2.0 license.
+ Copyright (c) 2026 yushihong. 
+ # This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0. If a copy of the MPL was not distributed with this file, You can obtain one at http://mozilla.org/MPL/2.0/.
  作者知乎主页：https://www.zhihu.com/people/mhaksy
  作者：yushihong 
  地址：福建.福州
